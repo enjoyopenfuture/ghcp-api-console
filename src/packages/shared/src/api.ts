@@ -22,6 +22,7 @@ export interface BatchSummary {
   total: number;
   success: number;
   skipped?: number;
+  warnings?: number;
   failed: number;
 }
 

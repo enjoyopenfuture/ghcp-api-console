@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     logger,
   );
 
-  console.error('[login-token] login succeeded; raw GitHub token follows on stdout');
+  console.error('[login-token] login succeeded; raw Copilot OAuth token follows on stdout');
   console.log(token);
 }
 
@@ -157,7 +157,7 @@ Debug flags:
   --debug-logs       Enable verbose account log.
   --debug-artifacts  Save Playwright traces/screenshots on failure.
 
-The command prints only the raw GitHub token to stdout. Progress and log path go to stderr.`;
+The command prints only the raw Copilot OAuth token to stdout. Progress and log path go to stderr.`;
 }
 
 main().catch((err: unknown) => {

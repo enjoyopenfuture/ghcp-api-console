@@ -135,6 +135,21 @@ export function updateCopilotSeat(
   return user;
 }
 
+export function updateCopilotSeatFromGitHub(ssoUser: string, status: 'assigned' | 'unassigned'): SsoUserRecord {
+  const now = nowIso();
+  getDb()
+    .prepare(`
+      UPDATE sso_users
+      SET copilot_seat_status = ?, copilot_seat_last_operation = NULL, copilot_seat_last_error = NULL,
+          copilot_seat_updated_at = ?, updated_at = ?
+      WHERE lower(sso_user) = lower(?)
+    `)
+    .run(status, now, now, ssoUser);
+  const user = getUser(ssoUser);
+  if (!user) throw new Error(`Unknown SSO user "${ssoUser}".`);
+  return user;
+}
+
 export function deleteUser(ssoUser: string): boolean {
   const result = getDb().prepare('DELETE FROM sso_users WHERE lower(sso_user) = lower(?)').run(ssoUser);
   return result.changes > 0;

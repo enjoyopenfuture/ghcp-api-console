@@ -3,7 +3,7 @@ import { loggerFor } from '@ghcp/shared';
 import { config } from '../config.js';
 import { HeadlessPlaywrightAuthStrategy } from '../auth/HeadlessPlaywrightAuthStrategy.js';
 import { loginWithDeviceFlow } from '../auth/deviceFlow.js';
-import { saveGithubToken } from '../clients/proxyClient.js';
+import { saveCopilotOauthToken } from '../clients/proxyClient.js';
 import { markFailed, markRunning, markSuccess, type LoginTaskRecord } from '../db/tasksRepo.js';
 import { AccountLogger } from './accountLogger.js';
 
@@ -26,7 +26,7 @@ export async function runLoginTask(task: LoginTaskRecord, payload: RuntimeTaskPa
       ssoProvider: payload.ssoType === 'azure' ? 'azure' as const : 'custom' as const,
       selectors: { ...config.auth.selectors, ...payload.selectorOverrides },
     };
-    const githubToken = await loginWithDeviceFlow(
+    const copilotOauthToken = await loginWithDeviceFlow(
       new HeadlessPlaywrightAuthStrategy(
         authConfig,
         {
@@ -38,10 +38,10 @@ export async function runLoginTask(task: LoginTaskRecord, payload: RuntimeTaskPa
       ),
       logger,
     );
-    await saveGithubToken(payload.identity, githubToken, payload.ghLogin);
+    await saveCopilotOauthToken(payload.identity, payload.oauthAttemptId, copilotOauthToken, payload.ghLogin);
     markSuccess(task.id);
-    logger.info('complete', 'Login task completed and token was written back to Proxy');
-    stdoutLogger.info('success', 'Login task completed and token was written back to Proxy', { taskId: task.id, identity: payload.identity, ssoUser: payload.ssoUser, ghLogin: payload.ghLogin, logPath: logger.path });
+    logger.info('complete', 'Login task completed and Copilot OAuth token was written back to Proxy');
+    stdoutLogger.info('success', 'Login task completed and Copilot OAuth token was written back to Proxy', { taskId: task.id, identity: payload.identity, ssoUser: payload.ssoUser, ghLogin: payload.ghLogin, logPath: logger.path });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     markFailed(task.id, message);

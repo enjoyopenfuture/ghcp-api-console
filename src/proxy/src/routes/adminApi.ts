@@ -1,9 +1,10 @@
 import { Router } from 'express';
-import { apiError, errorFields, type ImportGithubTokensRequest } from '@ghcp/shared';
-import { importGithubTokens } from '../accounts/githubTokenImport.js';
-import { getAccount, listAccounts, toAccountDto } from '../db/accountsRepo.js';
+import { apiError, errorFields, type ImportCopilotOauthTokensRequest } from '@ghcp/shared';
+import { importCopilotOauthTokens } from '../accounts/copilotOauthTokenImport.js';
+import { deleteAccount, getAccount, listAccounts, toAccountDto } from '../db/accountsRepo.js';
 import { listRequestStats } from '../db/requestStatsRepo.js';
-import { tokenManager } from '../copilot/tokenManager.js';
+import { copilotAuthManager } from '../copilot/copilotAuthManager.js';
+import { clearModelsCache } from '../copilot/copilotClient.js';
 import { Logger } from '../logger.js';
 
 export const adminApiRouter = Router();
@@ -29,20 +30,31 @@ adminApiRouter.get('/accounts/:identity', (req, res) => {
   res.json(toAccountDto(account));
 });
 
-adminApiRouter.post('/accounts/gh-token/import', async (req, res) => {
-  const body = req.body as ImportGithubTokensRequest;
+adminApiRouter.delete('/accounts/:identity', (req, res) => {
+  const result = deleteAccount(req.params.identity);
+  if (!result) {
+    res.status(404).json(apiError('account_not_found', 'Proxy account was not found.'));
+    return;
+  }
+  clearModelsCache(result.identity);
+  logger.info('delete-account', 'Deleted Proxy account and request stats', { ...result });
+  res.json(result);
+});
+
+adminApiRouter.post('/accounts/copilot-oauth-token/import', async (req, res) => {
+  const body = req.body as ImportCopilotOauthTokensRequest;
   if (typeof body.csvText !== 'string' || !body.csvText.trim()) {
     res.status(400).json(apiError('invalid_import', 'csvText is required.'));
     return;
   }
   try {
-    logger.info('import-gh-tokens-start', 'GitHub token CSV import requested');
-    const result = await importGithubTokens(body.csvText);
-    logger.info('import-gh-tokens-done', 'GitHub token CSV import completed', { total: result.summary.total, success: result.summary.success, failed: result.summary.failed });
+    logger.info('import-copilot-oauth-start', 'Copilot OAuth token CSV import requested');
+    const result = await importCopilotOauthTokens(body.csvText);
+    logger.info('import-copilot-oauth-done', 'Copilot OAuth token CSV import completed', { total: result.summary.total, success: result.summary.success, failed: result.summary.failed });
     res.json(result);
   } catch (err) {
-    logger.error('import-gh-tokens-failed', 'GitHub token CSV import failed', { ...errorFields(err) });
-    res.status(400).json(apiError('github_token_import_failed', err instanceof Error ? err.message : String(err)));
+    logger.error('import-copilot-oauth-failed', 'Copilot OAuth token CSV import failed', { ...errorFields(err) });
+    res.status(400).json(apiError('copilot_oauth_import_failed', err instanceof Error ? err.message : String(err)));
   }
 });
 
@@ -54,33 +66,20 @@ adminApiRouter.get('/request-stats', (req, res) => {
   res.json(listRequestStats(undefined, readLimit(req.query.limit)));
 });
 
-adminApiRouter.post('/accounts/:identity/copilot-token/refresh', async (req, res) => {
-  try {
-    logger.info('refresh-copilot-start', 'Manual Copilot token refresh requested', { identity: req.params.identity });
-    await tokenManager.refreshCopilot(req.params.identity);
-    const account = getAccount(req.params.identity);
-    logger.info('refresh-copilot-done', 'Manual Copilot token refresh completed', { identity: req.params.identity, copilotTokenStatus: account?.copilotTokenStatus });
-    res.json(account ? toAccountDto(account) : undefined);
-  } catch (err) {
-    logger.error('refresh-copilot-failed', 'Manual Copilot token refresh failed', { identity: req.params.identity, ...errorFields(err) });
-    res.status(502).json(apiError('copilot_refresh_failed', err instanceof Error ? err.message : String(err)));
-  }
-});
-
-adminApiRouter.post('/accounts/:identity/gh-token/refresh', async (req, res) => {
+adminApiRouter.post('/accounts/:identity/copilot-oauth/reauthorize', async (req, res) => {
   try {
     const body = req.body as { ssoPassword?: unknown; ssoType?: unknown };
-    logger.info('refresh-github-start', 'Manual GitHub token refresh requested', { identity: req.params.identity, ssoType: body.ssoType });
-    await tokenManager.triggerGithubRefresh(req.params.identity, {
+    logger.info('reauthorize-copilot-start', 'Manual Copilot OAuth reauthorization requested', { identity: req.params.identity, ssoType: body.ssoType });
+    await copilotAuthManager.triggerOauthRefresh(req.params.identity, {
       ssoPassword: typeof body.ssoPassword === 'string' ? body.ssoPassword : undefined,
       ssoType: body.ssoType === 'azure' || body.ssoType === 'custom' ? body.ssoType : undefined,
     });
     const account = getAccount(req.params.identity);
-    logger.info('refresh-github-queued', 'Manual GitHub token refresh queued login task', { identity: req.params.identity, ghTokenStatus: account?.ghTokenStatus });
+    logger.info('reauthorize-copilot-queued', 'Copilot OAuth reauthorization queued a login task', { identity: req.params.identity, copilotOauthStatus: account?.copilotOauthStatus });
     res.json(account ? toAccountDto(account) : undefined);
   } catch (err) {
-    logger.error('refresh-github-failed', 'Manual GitHub token refresh failed', { identity: req.params.identity, ...errorFields(err) });
-    res.status(400).json(apiError('github_refresh_failed', err instanceof Error ? err.message : String(err)));
+    logger.error('reauthorize-copilot-failed', 'Manual Copilot OAuth reauthorization failed', { identity: req.params.identity, ...errorFields(err) });
+    res.status(400).json(apiError('copilot_oauth_reauthorization_failed', err instanceof Error ? err.message : String(err)));
   }
 });
 

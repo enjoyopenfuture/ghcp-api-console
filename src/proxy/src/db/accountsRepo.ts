@@ -1,4 +1,4 @@
-import type { CopilotTokenStatus, GhTokenStatus, PageResponse, ProxyAccountDto } from '@ghcp/shared';
+import type { CopilotOauthStatus, DeleteProxyAccountResult, PageResponse, ProxyAccountDto } from '@ghcp/shared';
 import { nowIso, pageResponse } from '@ghcp/shared';
 import { getDb } from './connection.js';
 
@@ -6,13 +6,10 @@ export interface ProxyAccountRecord {
   identity: string;
   ssoUser: string;
   ghLogin?: string;
-  ghToken?: string;
-  ghTokenStatus: GhTokenStatus;
-  ghTokenUpdatedAt?: string;
-  copilotToken?: string;
-  copilotApi?: string;
-  copilotTokenExpiresAt?: string;
-  copilotTokenStatus: CopilotTokenStatus;
+  copilotOauthToken?: string;
+  copilotOauthStatus: CopilotOauthStatus;
+  copilotOauthUpdatedAt?: string;
+  copilotOauthAttemptId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -20,14 +17,11 @@ export interface ProxyAccountRecord {
 interface AccountRow {
   identity: string;
   sso_user: string;
-  gh_login?: string;
-  gh_token?: string;
-  gh_token_status: GhTokenStatus;
-  gh_token_updated_at?: string;
-  copilot_token?: string;
-  copilot_api?: string;
-  copilot_token_expires_at?: string;
-  copilot_token_status: CopilotTokenStatus;
+  gh_login: string | null;
+  copilot_oauth_token: string | null;
+  copilot_oauth_status: CopilotOauthStatus;
+  copilot_oauth_updated_at: string | null;
+  copilot_oauth_attempt_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -36,7 +30,7 @@ export interface AccountListQuery {
   q?: string;
   page?: number;
   pageSize?: number;
-  sort?: 'identity' | 'ssoUser' | 'ghLogin' | 'ghTokenStatus' | 'copilotTokenStatus' | 'createdAt' | 'updatedAt';
+  sort?: 'identity' | 'ssoUser' | 'ghLogin' | 'copilotOauthStatus' | 'createdAt' | 'updatedAt';
   dir?: 'asc' | 'desc';
 }
 
@@ -65,6 +59,23 @@ export function listAccounts(query: AccountListQuery = {}): PageResponse<ProxyAc
 export function getAccount(identity: string): ProxyAccountRecord | undefined {
   const row = getDb().prepare('SELECT * FROM proxy_accounts WHERE identity = ?').get(identity) as AccountRow | undefined;
   return row ? mapRow(row) : undefined;
+}
+
+export function deleteAccount(identity: string): DeleteProxyAccountResult | undefined {
+  const target = identity.trim();
+  if (!target) return undefined;
+  return getDb().transaction(() => {
+    const exists = getDb().prepare('SELECT 1 FROM proxy_accounts WHERE identity = ?').get(target);
+    if (!exists) return undefined;
+    const deletedRequestStats = getDb()
+      .prepare('DELETE FROM proxy_request_stats WHERE identity = ?')
+      .run(target).changes;
+    const deletedAccount = getDb()
+      .prepare('DELETE FROM proxy_accounts WHERE identity = ?')
+      .run(target).changes;
+    if (deletedAccount !== 1) throw new Error(`Failed to delete Proxy account "${target}".`);
+    return { identity: target, deletedRequestStats };
+  })();
 }
 
 export function deleteAccountsBySsoUser(ssoUser: string): DeleteAccountsBySsoUserResult {
@@ -98,14 +109,14 @@ export function createAccount(input: {
   identity: string;
   ssoUser: string;
   ghLogin?: string;
-  ghTokenStatus?: GhTokenStatus;
-  copilotTokenStatus?: CopilotTokenStatus;
+  copilotOauthStatus?: CopilotOauthStatus;
+  copilotOauthAttemptId?: string;
 }): ProxyAccountRecord {
   const now = nowIso();
   getDb()
     .prepare(`
       INSERT INTO proxy_accounts (
-        identity, sso_user, gh_login, gh_token_status, copilot_token_status, created_at, updated_at
+        identity, sso_user, gh_login, copilot_oauth_status, copilot_oauth_attempt_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(identity) DO UPDATE SET
         sso_user = excluded.sso_user,
@@ -116,88 +127,102 @@ export function createAccount(input: {
       input.identity,
       input.ssoUser,
       input.ghLogin,
-      input.ghTokenStatus ?? 'missing',
-      input.copilotTokenStatus ?? 'missing',
+      input.copilotOauthStatus ?? 'missing',
+      input.copilotOauthAttemptId,
       now,
       now,
     );
   return getAccount(input.identity)!;
 }
 
-export function importGithubToken(input: {
+export function importCopilotOauthToken(input: {
   identity: string;
   ssoUser: string;
   ghLogin?: string;
-  ghToken: string;
+  copilotOauthToken: string;
 }): ProxyAccountRecord {
   const now = nowIso();
   getDb()
     .prepare(`
       INSERT INTO proxy_accounts (
-        identity, sso_user, gh_login, gh_token, gh_token_status, gh_token_updated_at,
-        copilot_token, copilot_api, copilot_token_expires_at, copilot_token_status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 'valid', ?, NULL, NULL, NULL, 'expired', ?, ?)
+        identity, sso_user, gh_login, copilot_oauth_token, copilot_oauth_status,
+        copilot_oauth_updated_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'valid', ?, ?, ?)
       ON CONFLICT(identity) DO UPDATE SET
         sso_user = excluded.sso_user,
         gh_login = COALESCE(excluded.gh_login, proxy_accounts.gh_login),
-        gh_token = excluded.gh_token,
-        gh_token_status = 'valid',
-        gh_token_updated_at = excluded.gh_token_updated_at,
-        copilot_token = NULL,
-        copilot_api = NULL,
-        copilot_token_expires_at = NULL,
-        copilot_token_status = 'expired',
+        copilot_oauth_token = excluded.copilot_oauth_token,
+        copilot_oauth_status = 'valid',
+        copilot_oauth_updated_at = excluded.copilot_oauth_updated_at,
+        copilot_oauth_attempt_id = NULL,
         updated_at = excluded.updated_at
     `)
-    .run(input.identity, input.ssoUser, input.ghLogin, input.ghToken, now, now, now);
+    .run(input.identity, input.ssoUser, input.ghLogin, input.copilotOauthToken, now, now, now);
   return getAccount(input.identity)!;
 }
 
-export function saveGithubToken(identity: string, ghToken: string, ghLogin?: string): ProxyAccountRecord {
+export function saveCopilotOauthToken(
+  identity: string,
+  oauthAttemptId: string,
+  copilotOauthToken: string,
+  ghLogin?: string,
+): ProxyAccountRecord | undefined {
   const now = nowIso();
-  getDb()
+  const result = getDb()
     .prepare(`
       UPDATE proxy_accounts
-      SET gh_token = ?, gh_login = COALESCE(?, gh_login), gh_token_status = 'valid',
-          gh_token_updated_at = ?, copilot_token_status = 'expired', updated_at = ?
-      WHERE identity = ?
+      SET copilot_oauth_token = ?, gh_login = COALESCE(?, gh_login),
+          copilot_oauth_status = 'valid', copilot_oauth_updated_at = ?,
+          copilot_oauth_attempt_id = NULL, updated_at = ?
+      WHERE identity = ? AND copilot_oauth_attempt_id = ?
     `)
-    .run(ghToken, ghLogin, now, now, identity);
-  const account = getAccount(identity);
-  if (!account) throw new Error(`Unknown proxy account identity "${identity}".`);
-  return account;
+    .run(copilotOauthToken, ghLogin, now, now, identity, oauthAttemptId);
+  return result.changes > 0 ? getAccount(identity) : undefined;
 }
 
-export function markGithubTokenStatus(identity: string, status: GhTokenStatus): void {
+export function markCopilotOauthStatus(identity: string, status: CopilotOauthStatus): void {
   getDb()
-    .prepare('UPDATE proxy_accounts SET gh_token_status = ?, updated_at = ? WHERE identity = ?')
+    .prepare('UPDATE proxy_accounts SET copilot_oauth_status = ?, updated_at = ? WHERE identity = ?')
     .run(status, nowIso(), identity);
 }
 
-export function saveCopilotToken(input: {
-  identity: string;
-  token: string;
-  api: string;
-  expiresAt: string;
-}): ProxyAccountRecord {
-  const now = nowIso();
-  getDb()
+export function beginCopilotOauthAuthorization(identity: string, oauthAttemptId: string): boolean {
+  return getDb()
     .prepare(`
       UPDATE proxy_accounts
-      SET copilot_token = ?, copilot_api = ?, copilot_token_expires_at = ?,
-          copilot_token_status = 'valid', updated_at = ?
+      SET copilot_oauth_status = 'refreshing', copilot_oauth_attempt_id = ?, updated_at = ?
       WHERE identity = ?
     `)
-    .run(input.token, input.api, input.expiresAt, now, input.identity);
-  const account = getAccount(input.identity);
-  if (!account) throw new Error(`Unknown proxy account identity "${input.identity}".`);
-  return account;
+    .run(oauthAttemptId, nowIso(), identity).changes > 0;
 }
 
-export function markCopilotTokenStatus(identity: string, status: CopilotTokenStatus): void {
-  getDb()
-    .prepare('UPDATE proxy_accounts SET copilot_token_status = ?, updated_at = ? WHERE identity = ?')
-    .run(status, nowIso(), identity);
+export function failCopilotOauthAuthorization(
+  identity: string,
+  oauthAttemptId: string,
+): boolean {
+  return getDb()
+    .prepare(`
+      UPDATE proxy_accounts
+      SET copilot_oauth_status = 'failed', updated_at = ?
+      WHERE identity = ? AND copilot_oauth_attempt_id = ?
+    `)
+    .run(nowIso(), identity, oauthAttemptId).changes > 0;
+}
+
+export function invalidateCopilotOauthToken(
+  identity: string,
+  expectedToken: string,
+  status: Extract<CopilotOauthStatus, 'expired' | 'failed'>,
+): boolean {
+  const now = nowIso();
+  return getDb()
+    .prepare(`
+      UPDATE proxy_accounts
+      SET copilot_oauth_token = NULL, copilot_oauth_status = ?,
+          copilot_oauth_updated_at = ?, copilot_oauth_attempt_id = NULL, updated_at = ?
+      WHERE identity = ? AND copilot_oauth_token = ? AND copilot_oauth_status = 'valid'
+    `)
+    .run(status, now, now, identity, expectedToken).changes > 0;
 }
 
 export function toAccountDto(account: ProxyAccountRecord): ProxyAccountDto {
@@ -205,10 +230,8 @@ export function toAccountDto(account: ProxyAccountRecord): ProxyAccountDto {
     identity: account.identity,
     ssoUser: account.ssoUser,
     ghLogin: account.ghLogin,
-    ghTokenStatus: account.ghTokenStatus,
-    ghTokenUpdatedAt: account.ghTokenUpdatedAt,
-    copilotTokenStatus: account.copilotTokenStatus,
-    copilotTokenExpiresAt: account.copilotTokenExpiresAt,
+    copilotOauthStatus: account.copilotOauthStatus,
+    copilotOauthUpdatedAt: account.copilotOauthUpdatedAt,
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
   };
@@ -218,14 +241,11 @@ function mapRow(row: AccountRow): ProxyAccountRecord {
   return {
     identity: row.identity,
     ssoUser: row.sso_user,
-    ghLogin: row.gh_login,
-    ghToken: row.gh_token,
-    ghTokenStatus: row.gh_token_status,
-    ghTokenUpdatedAt: row.gh_token_updated_at,
-    copilotToken: row.copilot_token,
-    copilotApi: row.copilot_api,
-    copilotTokenExpiresAt: row.copilot_token_expires_at,
-    copilotTokenStatus: row.copilot_token_status,
+    ghLogin: row.gh_login ?? undefined,
+    copilotOauthToken: row.copilot_oauth_token ?? undefined,
+    copilotOauthStatus: row.copilot_oauth_status,
+    copilotOauthUpdatedAt: row.copilot_oauth_updated_at ?? undefined,
+    copilotOauthAttemptId: row.copilot_oauth_attempt_id ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -239,10 +259,8 @@ function sortColumn(sort: AccountListQuery['sort']): string {
       return 'sso_user';
     case 'ghLogin':
       return 'gh_login';
-    case 'ghTokenStatus':
-      return 'gh_token_status';
-    case 'copilotTokenStatus':
-      return 'copilot_token_status';
+    case 'copilotOauthStatus':
+      return 'copilot_oauth_status';
     case 'createdAt':
       return 'created_at';
     default:

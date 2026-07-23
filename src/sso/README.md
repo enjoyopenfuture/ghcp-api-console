@@ -43,7 +43,7 @@ SSO 模块负责“本地 SSO 用户 ↔ GitHub Enterprise Managed User(EMU)”�
 - enterprise role 可由请求显式传入；未传时本地 `role=admin` 映射为 `enterprise_owner`，其他映射为 `user`。
 - `suspend_emu`：PATCH SCIM user 的 `active=false`，并标记 `emuStatus=suspended`。
 - `delete_emu`：移除 Copilot seat、删除 SCIM user，并将本地 EMU 信息重置为 `not_synced`。
-- 反向导入：从 SCIM 拉取用户生成 preview plan，可 apply 到本地 SQLite。
+- 反向导入：从 SCIM 拉取用户并分页读取 Enterprise Copilot seats 生成 preview plan，apply 时同步本地身份映射和 `copilot_seat_status`。
 - SCIM 请求支持节流和对 `429`、`5xx`、带 `retry-after` 的 `403` 重试。
 
 ### Copilot seats 与 AI Credits
@@ -192,7 +192,7 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 | `sso_users` | `sso_user` PK | `password_hash`, `salt`, `email`, `role`, `gh_login`, `gh_scim_id`, `emu_status`, `copilot_seat_status`, `copilot_seat_last_operation`, `copilot_seat_last_error`, `copilot_seat_updated_at`, `created_at`, `updated_at` | 本地 SSO 用户和外部身份映射。 |
 | `sso_budget_cache` | `period_key` PK | `year`, `month`, `quantity`, `unit_type`, `raw_json`, `fetched_at` | AI Credits 月度用量缓存。 |
 | `sso_emu_import_plans` | `id` PK | `sso_user`, `status`, `created_at`, `updated_at`, `applied_at` | SCIM 反向导入 preview/apply 计划。 |
-| `sso_emu_import_plan_rows` | `(plan_id, row_index)` PK；`(plan_id,status,row_index)` 索引 | `sso_user`, `email`, `gh_login`, `gh_scim_id`, `emu_status`, `status`, `detail`, `password_for_login`, `action` | 导入计划明细。 |
+| `sso_emu_import_plan_rows` | `(plan_id, row_index)` PK；`(plan_id,status,row_index)` 索引 | `sso_user`, `email`, `gh_login`, `gh_scim_id`, `emu_status`, `copilot_seat_status`, `status`, `detail`, `password_for_login`, `action` | 导入计划明细。 |
 
 当前未配置：`gh_login`、`gh_scim_id` 没有数据库唯一索引；重复绑定主要依赖业务逻辑检查。
 
@@ -201,7 +201,7 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 - `SsoUserRecord`：数据库用户记录，等于 `SsoUserDto` 加上 `passwordHash`、`salt`。
 - `ScimUserResource`：SCIM 用户资源，包含 `id`、`userName`、`externalId`、`emails`、`roles`、`active`、`githubLogin`。
 - `ProvisionResult`：SCIM 同步结果 `{ scimId, ghLogin }`。
-- `ImportEmuPlanDto` / `ImportEmuUserRow`：反向导入计划及行结果。
+- `ImportEmuPlanDto` / `ImportEmuUserRow`：包含 SCIM 身份与 Copilot seat 状态的反向导入计划及行结果。
 - `AiCreditsUsageDto`：上月、本月、预计本月用量、已分配 seat 数、seat 月成本。
 - `BatchResult<T>` / `PageResponse<T>`：共享的批处理和分页响应壳。
 
@@ -232,7 +232,7 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 | `src/users/bulkImport.ts` | 简单 CSV 解析，支持 header、去重和错误收集。 |
 | `src/scim/scimClient.ts` | SCIM create/update/list/suspend/delete、鉴权、重试、节流。 |
 | `src/scim/handle.ts` | 从 `ssoUser` 和 enterprise shortcode 推导 GH login。 |
-| `src/copilot/seats.ts` | GitHub Copilot selected users assign/remove。 |
+| `src/copilot/seats.ts` | GitHub Copilot selected users assign/remove，以及 Enterprise seat 列表分页查询。 |
 | `src/budget/budgetService.ts` | AI Credits usage 查询、缓存和投影计算。 |
 | `src/routes/budgetApi.ts` | AI Credits cache 读取/刷新 API。 |
 | `src/db/*` | SQLite 连接、migration、用户 repo、预算 cache repo、导入计划 repo、事件日志。 |

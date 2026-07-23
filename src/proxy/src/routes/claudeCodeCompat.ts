@@ -358,9 +358,16 @@ function mergeToolResultTextBlocks(body: Record<string, unknown>): void {
     const targetIndex = findLastIndex(rebuilt, (block) => recordField(block)?.type === 'tool_result');
     const target = recordField(rebuilt[targetIndex]);
     if (!target) continue;
+    if (toolResultHasReferenceBlock(target)) continue;
     appendTextToToolResult(target, textParts.join('\n\n'));
     object.content = rebuilt;
   }
+}
+
+function toolResultHasReferenceBlock(toolResult: Record<string, unknown>): boolean {
+  const content = toolResult.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => recordField(block)?.type === 'tool_reference');
 }
 
 function appendTextToToolResult(toolResult: Record<string, unknown>, text: string): void {

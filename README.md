@@ -1,10 +1,11 @@
 # GHCP API Learning
 
-这个项目探索一种把 **GitHub Copilot 后端能力作为“裸 API”集中提供** 的方案：对调用方暴露 OpenAI / Anthropic / Responses 兼容接口，对内自动管理 GitHub Enterprise Managed User(EMU)、SSO 登录、GitHub token、Copilot token 和后台运维。
+这个项目探索一种把 **GitHub Copilot 后端能力作为“API”提供 LLM 服务** 的方案：对调用方暴露 OpenAI / Anthropic / Responses 兼容接口，对内自动管理 GitHub Enterprise Managed User(EMU)、SSO 登录、OpenCode Copilot OAuth 凭据和后台运维。
 
 > 重要：GitHub Copilot 当前并不提供面向第三方服务端集成的公开裸 API。本项目依赖 Copilot 内部接口，适合学习、验证和自维护部署；用于生产前必须自行评估合规、稳定性和运维风险。
 
 > proxy 参考repo https://github.com/hooyao/copilot-bridge
+> 获得 GitHub Copilot Token的部分参考了 OpenCode 项目
 
 > 管理员的配置手册: ([guidance/guidance.md](./guidance/guidance.md))
 
@@ -23,9 +24,9 @@
 本项目通过 **GitHub Enterprise Managed User + 自定义 SSO + 自动化登录 + API Proxy** 组合解决上述问题：
 
 - 使用自定义 SSO/SAML IdP 结合 GitHub EMU，通过 SCIM 批量创建和同步 GitHub 账号，避免手工注册大量普通 GitHub 账号。
-- 使用 Playwright 自动完成 GitHub OAuth device flow 和 SSO 登录，拿到每个用户对应 GitHub 账号的 token。
+- 使用 OpenCode OAuth client 发起 GitHub Device Flow，并由 Playwright 自动完成 GitHub/SSO 登录。
 - 通过 Proxy 统一维护 `identity -> ssoUser -> ghLogin -> token` 映射，并对外提供兼容 API。
-- 支持批量导入 GitHub token，也支持后台控制台查看账号、请求统计、登录任务、AI Credits 和 Copilot seat 状态。
+- 支持验证后批量导入 OpenCode Copilot OAuth token，也支持后台控制台查看账号、请求统计、登录任务、AI Credits 和 Copilot seat 状态。
 - 在 Proxy 层包含 Claude Code / Anthropic Messages 相关兼容优化。
 
 整体调用链：
@@ -37,8 +38,8 @@ Client
   -> 首次使用时 proxy 调 sso 确保用户并同步 EMU
   -> proxy 调 login 创建自动登录任务
   -> login 完成 GitHub device flow + SSO 登录
-  -> login 把 GitHub token 回写 proxy
-  -> proxy 换取 Copilot token 并转发请求
+  -> login 把 Copilot OAuth token 回写 proxy
+  -> proxy 直接以 Bearer token 调用 Copilot API
 ```
 
 `sso` 和 `login` 没有直接服务间调度关系；它们都由 `proxy` 或 `console` 通过内部 API 协调。
@@ -47,9 +48,9 @@ Client
 
 | 模块 | 职责 |
 | --- | --- |
-| `src/proxy` | 对外 API 网关；鉴权、identity 映射、GitHub/Copilot token 管理、请求转发和统计。 |
+| `src/proxy` | 对外 API 网关；鉴权、identity 映射、Copilot OAuth 管理、请求转发和统计。 |
 | `src/sso` | 自定义 SAML IdP；SSO 用户、EMU/SCIM、Copilot seat、AI Credits 用量。 |
-| `src/login` | GitHub device flow + Playwright 自动登录；成功后回写 GitHub token。 |
+| `src/login` | OpenCode OAuth Device Flow + Playwright 自动登录；成功后回写 Copilot OAuth token。 |
 | `src/console` | Web 管理控制台；统一操作 proxy/sso/login 管理 API。 |
 | `src/packages/shared` | 跨服务共享 DTO、HTTP client、logger、错误结构和工具。 |
 
@@ -87,15 +88,17 @@ cp .env.example .env
 | `SCIM_BASE_URL` / `SCIM_TOKEN` | GitHub Enterprise SCIM API 地址和 token。 |
 | `GITHUB_COPILOT_SEAT_PAT` | 管理 Copilot seat / AI Credits 的 GitHub PAT。 |
 
-根目录 `.env` 也包含 proxy 的公共 API 和转发 header 配置。Docker Compose 默认使用 `CLAUDE_CODE_OPTIMIZED=true` 启动 proxy，作为 Claude Code / Anthropic Messages 兼容优化和 `/v1/messages/count_tokens` 的默认模式；单个请求可用 `X-Claude-Code-Optimized: true|false` 覆盖，无需重启服务。
+根目录 `.env` 也包含 proxy 的公共 API 和 OpenCode 认证/header 配置。Docker Compose 默认使用 `CLAUDE_CODE_OPTIMIZED=true` 启动 proxy，作为 Claude Code / Anthropic Messages 兼容优化和 `/v1/messages/count_tokens` 的默认模式；单个请求可用 `X-Claude-Code-Optimized: true|false` 覆盖，无需重启服务。
 
 | 变量 | 说明 |
 | --- | --- |
 | `IDENTITY_HEADER` / `IDENTITY_HEADER_REQUIRED` | 调用方身份 header 名称和是否必填；默认 `X-User-Identity` 必填。 |
-| `EDITOR_VERSION` / `EDITOR_PLUGIN_VERSION` / `USER_AGENT` | proxy 向 Copilot 后端转发时使用的编辑器标识 header。 |
-| `GITHUB_API_VERSION` / `COPILOT_INTEGRATION_ID` | proxy 默认 Copilot/GitHub API 版本和集成标识 header。 |
-| `VSCODE_SESSION_ID` / `VSCODE_MACHINE_ID` / `EDITOR_DEVICE_ID` | 请求解析为 Claude Code 优化模式时使用的 VS Code 风格 header；留空时每个 proxy 进程随机生成。 |
-| `CLAUDE_CODE_GITHUB_API_VERSION` | 请求解析为 Claude Code 优化模式时覆盖转发请求的 `X-GitHub-Api-Version`。 |
+| `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_SCOPE` | Login 使用的 OpenCode OAuth client 和 Device Flow scope。 |
+| `OPENCODE_VERSION` / `OPENCODE_USER_AGENT` | Login 与 Proxy 请求使用的 OpenCode User-Agent；显式 User-Agent 优先。 |
+| `COPILOT_API_BASE_URL` | Copilot API 地址；GitHub.com 默认 `https://api.githubcopilot.com`。 |
+| `GITHUB_API_VERSION` | Copilot 请求的 `X-GitHub-Api-Version`，默认 `2026-06-01`。 |
+
+> **升级提示**：首次用新版本打开旧 `proxy.sqlite` 时会保留 identity、SSO/GH login 映射和请求统计，但会不可逆清除旧 VS Code/GitHub token 与短期 Copilot token。升级前先备份数据库，升级后在 Console 逐账号重新授权，或导入通过 OpenCode OAuth client 获取的新 token。
 
 2. 准备 SAML 证书：
 
@@ -123,7 +126,7 @@ npm run validate:health
 http://localhost:7004
 ```
 
-首次访问会创建本地控制台管理员。之后可以在控制台管理 SSO 用户、EMU 同步、Proxy 账号、登录任务、GitHub token 导入和请求统计。
+首次访问会创建本地控制台管理员。之后可以在控制台管理 SSO 用户、EMU 同步、Proxy 账号、登录任务、Copilot OAuth 重授权/导入和请求统计。
 
 ## 调用 API
 
@@ -141,6 +144,8 @@ X-Claude-Code-Optimized: true|false  # 可选；覆盖 CLAUDE_CODE_OPTIMIZED 默
 ```bash
 curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer $API_KEY" \
+  -H "X-Claude-Code-Optimized: false" \
+  -H "X-Cache: false" \
   -H "X-User-Identity: alice"
 ```
 
@@ -191,12 +196,12 @@ curl http://localhost:3000/responses \
   -H "X-User-Identity: alice" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-5",
+    "model": "gpt-5-mini",
     "input": "用一句话说明 GitHub Copilot 的用途。"
   }'
 ```
 
-`model` 需要替换为支持目标 API path 的模型。默认 `CLAUDE_CODE_OPTIMIZED=true` 时，`GET /v1/models` 面向 Claude Code 只返回支持 `/v1/messages` 的模型，并保持 Copilot 原始模型名，例如 `claude-opus-4.8`；如果某次请求需要完整 Copilot/OpenAI 风格模型列表，传 `X-Claude-Code-Optimized: false`。`/responses` 示例中的 `gpt-5` 需要替换为账号可用且支持 `/responses` 的 Copilot 模型。如果你在 `.env` 里改了 `IDENTITY_HEADER`，示例里的 `X-User-Identity` 也要同步替换。
+`model` 需要替换为支持目标 API path 的模型。默认 `CLAUDE_CODE_OPTIMIZED=true` 时，`GET /v1/models` 面向 Claude Code 只返回支持 `/v1/messages` 的模型，并保持 Copilot 原始模型名，例如 `claude-opus-4.8`；如果某次请求需要完整 Copilot/OpenAI 风格模型列表，传 `X-Claude-Code-Optimized: false`。`/responses` 示例中的 `gpt-5-mini` 需要替换为账号可用且支持 `/responses` 的 Copilot 模型。如果你在 `.env` 里改了 `IDENTITY_HEADER`，示例里的 `X-User-Identity` 也要同步替换。
 
 Claude Code 可以通过 settings 文件接入本地 proxy，例如 `~/.claude/settings.json` ：
 
@@ -239,5 +244,5 @@ npm run start:console
 - Copilot 后端不是正式公开的裸 API，一些模型能力、参数、流式格式或模型可见性可能与 OpenAI/Anthropic 官方 API 不完全一致。
 - Copilot 内部 API 可能被 GitHub 产品组调整，生产使用可能受到兼容性影响。
 - 本项目是开源自维护方案，不提供托管 SLA；部署、密钥、账号、合规、日志和安全策略需要使用方自行负责。
-- 账号和 token 涉及敏感权限，不能提交 `.env`、SQLite 数据库、日志、Playwright trace、GitHub token 或 SSO 密码。
+- 账号和 token 涉及敏感权限，不能提交 `.env`、SQLite 数据库、日志、Playwright trace、Copilot OAuth token 或 SSO 密码。
 - EMU、SAML、SCIM、Copilot seat 配置依赖 GitHub Enterprise 管理权限；没有这些前提无法完整跑通批量账号和自动登录流程。

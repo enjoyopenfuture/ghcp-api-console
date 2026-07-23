@@ -71,7 +71,14 @@ tasksApiRouter.post('/tasks/:id/retry', (req, res) => {
     res.status(404).json(apiError('task_not_found', 'Login task was not found.'));
     return;
   }
-  const parsed = readCreateTask({ ...req.body, identity: task.identity, ssoUser: task.ssoUser, ghLogin: task.ghLogin, ssoType: task.ssoType });
+  const parsed = readCreateTask({
+    ...req.body,
+    identity: task.identity,
+    ssoUser: task.ssoUser,
+    ghLogin: task.ghLogin,
+    oauthAttemptId: task.oauthAttemptId,
+    ssoType: task.ssoType,
+  });
   if (!parsed.ok) {
     res.status(400).json(apiError('invalid_login_task', parsed.error));
     return;
@@ -86,6 +93,9 @@ function readCreateTask(body: unknown): ParseResult {
   if (typeof value.identity !== 'string' || !value.identity.trim()) return { ok: false, error: 'identity is required.' };
   if (typeof value.ssoUser !== 'string' || !value.ssoUser.trim()) return { ok: false, error: 'ssoUser is required.' };
   if (typeof value.ghLogin !== 'string' || !value.ghLogin.trim()) return { ok: false, error: 'ghLogin is required.' };
+  if (typeof value.oauthAttemptId !== 'string' || !value.oauthAttemptId.trim()) {
+    return { ok: false, error: 'oauthAttemptId is required; start a new reauthorization for legacy tasks.' };
+  }
   if (value.ssoType !== 'azure' && value.ssoType !== 'custom') return { ok: false, error: 'ssoType must be custom or azure.' };
   return {
     ok: true,
@@ -94,6 +104,7 @@ function readCreateTask(body: unknown): ParseResult {
       ssoUser: value.ssoUser.trim(),
       ssoPassword: typeof value.ssoPassword === 'string' ? value.ssoPassword : '',
       ghLogin: value.ghLogin.trim(),
+      oauthAttemptId: value.oauthAttemptId.trim(),
       ssoType: value.ssoType,
       ssoUrl: typeof value.ssoUrl === 'string' && value.ssoUrl.trim() ? value.ssoUrl.trim() : undefined,
       accountType: value.accountType === 'business' || value.accountType === 'enterprise' ? value.accountType : undefined,

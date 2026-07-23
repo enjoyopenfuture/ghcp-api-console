@@ -46,6 +46,7 @@ export function runMigrations(db: Database.Database): void {
       gh_login TEXT,
       gh_scim_id TEXT,
       emu_status TEXT,
+      copilot_seat_status TEXT,
       status TEXT NOT NULL,
       detail TEXT NOT NULL,
       password_for_login TEXT,
@@ -59,4 +60,11 @@ export function runMigrations(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_sso_emu_import_plan_rows_status
       ON sso_emu_import_plan_rows (plan_id, status, row_index);
   `);
+  addColumnIfMissing(db, 'sso_emu_import_plan_rows', 'copilot_seat_status', 'TEXT');
+}
+
+function addColumnIfMissing(db: Database.Database, table: string, column: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (columns.some((item) => item.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }

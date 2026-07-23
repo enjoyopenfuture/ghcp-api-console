@@ -36,7 +36,7 @@ Console 解决“运维/开发人员如何集中管理各服务状态和手动�
 | SSO Users | `UsersPage` | 查询/分页、创建、编辑、CSV 导入、批量创建、从 GH/SCIM 预览并应用导入、批量同步/挂起/删除 GH login、分配/移除 Copilot seat。 |
 | AI Credits Usage | `AiCreditsUsagePage` | 读取/刷新企业 AI Credits 用量、展示预计本月用量和 Copilot seat 成本。 |
 | Request Stats | `RequestStatsPage` | 查看 proxy 请求统计，按 identity/GH login、model、成功状态过滤。 |
-| Proxy Accounts | `ProxyAccountsPage` | 查看 identity 映射和 token 状态、详情、导入 GitHub token、刷新 GitHub/Copilot token。 |
+| Proxy Accounts | `ProxyAccountsPage` | 查看 identity 映射和 Copilot OAuth 状态、详情、验证后导入 token、发起重新授权、批量删除选中 Proxy account 及其 request stats。 |
 | Login Tasks | `LoginTasksPage` | 查询/分页/筛选登录任务，取消、重试失败任务、删除终态任务。 |
 | Diagnostics | `DiagnosticsPage` | 调用 proxy/sso/login-service 代理路由检查服务连通性和内部 token 是否匹配。 |
 
@@ -154,10 +154,10 @@ Console 使用 `dotenv/config` 读取当前进程工作目录下的 `.env`，建
 | --- | --- | --- |
 | `listProxyAccounts({ q,page,pageSize,sort,dir })` | `GET /api/console/proxy/accounts` | `PageResponse<ProxyAccountDto>`；兼容数组响应并在前端包装分页。 |
 | `getProxyAccount(identity)` | `GET /api/console/proxy/accounts/:identity` | `ProxyAccountDto` |
+| `deleteProxyAccount(identity)` | `DELETE /api/console/proxy/accounts/:identity` | `DeleteProxyAccountResult`；只删除 Proxy 数据，不删除 SSO/GH 用户。 |
 | `listRequestStats({ identity?, limit? })` | `GET /api/console/proxy/request-stats` 或 `/accounts/:identity/request-stats` | `ProxyRequestStatDto[]` |
-| `refreshCopilotToken(identity)` | `POST /api/console/proxy/accounts/:identity/copilot-token/refresh` | `ProxyAccountDto | undefined` |
-| `refreshGithubToken(identity, { ssoPassword, ssoType })` | `POST /api/console/proxy/accounts/:identity/gh-token/refresh` | `ProxyAccountDto | undefined` |
-| `importGithubTokens(csvText)` | `POST /api/console/proxy/accounts/gh-token/import` | `BatchResult<ImportGithubTokenRow>`；请求 `{ csvText }`。 |
+| `reauthorizeCopilotOauth(identity, { ssoPassword, ssoType })` | `POST /api/console/proxy/accounts/:identity/copilot-oauth/reauthorize` | `ProxyAccountDto | undefined` |
+| `importCopilotOauthTokens(csvText)` | `POST /api/console/proxy/accounts/copilot-oauth-token/import` | `BatchResult<ImportCopilotOauthTokenRow>`；请求 `{ csvText }`。 |
 
 #### sso client（`src/web/api/sso.ts`）
 
@@ -225,13 +225,13 @@ interface ConsoleSession {
 
 主要模型来自 `@ghcp/shared/src/contracts.ts`：
 
-- `ProxyAccountDto`：`identity`、`ssoUser`、可选 `ghLogin`、GitHub/Copilot token 状态与时间戳。
+- `ProxyAccountDto`：`identity`、`ssoUser`、可选 `ghLogin`、Copilot OAuth 状态与更新时间。
 - `ProxyRequestStatDto`：请求时间、identity、path、model、成功/失败原因、input/output/cache token 统计。
 - `SsoUserDto`：`ssoUser`、email、role、可选 `ghLogin/ghScimId`、EMU 状态、Copilot seat 状态与错误。
 - `LoginTaskDto`：任务 id、identity、ssoUser、可选 ghLogin、`ssoType`、状态、尝试次数、失败原因、时间戳。
 - `AiCreditsUsageDto`：企业名、上月/本月用量、当前月预测、seat 数量与成本。
 - `ImportEmuPlanDto` / `ImportEmuUserRow`：GH/SCIM 导入预览、应用结果、行级状态与摘要。
-- `ImportGithubTokenRow`、`SsoUserBatchRow`：批处理行结果。
+- `ImportCopilotOauthTokenRow`、`SsoUserBatchRow`：批处理行结果。
 - 通用 `PageResponse<T>`：`{ items, total, page, pageSize }`。
 - 通用 `BatchResult<Row>`：`{ batchId, startedAt, finishedAt, summary, rows }`。
 
@@ -239,7 +239,7 @@ interface ConsoleSession {
 
 - `SsoType`: `'azure' | 'custom'`
 - `LoginTaskStatus`: `'pending' | 'running' | 'success' | 'failed' | 'cancelled'`
-- `GhTokenStatus` / `CopilotTokenStatus`: `'valid' | 'expired' | 'missing' | 'refreshing' | 'failed'`
+- `CopilotOauthStatus`: `'valid' | 'expired' | 'missing' | 'refreshing' | 'failed'`
 - `EmuStatus`: `'active' | 'suspended' | 'deleted' | 'not_synced'`
 - `CopilotSeatStatus`: `'unknown' | 'assigned' | 'unassigned' | 'assign_failed' | 'remove_failed'`
 - `SsoUserBatchOperation`: `'sync_emu' | 'suspend_emu' | 'delete_emu' | 'delete_sso' | 'assign_copilot' | 'remove_copilot'`
@@ -276,4 +276,4 @@ src/console/
 - 调试认证：先看 `/api/console/setup`、`/api/console/me`；服务间 401/403 多半是 `INTERNAL_API_TOKEN` 与上游不一致。
 - 调试转发：设置 `LOG_LEVEL=debug` 或 `info`，查看 `[console:api-proxy]` 日志中的 target、method、suffix、status、durationMs。
 - 调试前端：浏览器 Network 中应只看到 `/api/console/**`；如果直接访问 proxy/sso/login，说明调用边界被破坏。
-- 敏感信息：`SESSION_SECRET`、`INTERNAL_API_TOKEN`、SSO 密码、GitHub token 不要提交；Console 的 GitHub token 导入只把 CSV 发给 proxy，上游是否存储由 proxy 负责。
+- 敏感信息：`SESSION_SECRET`、`INTERNAL_API_TOKEN`、SSO 密码、Copilot OAuth token 不要提交；Console 只把导入 CSV 发给 proxy，proxy 在 `/models` 验证通过后才存储 token。

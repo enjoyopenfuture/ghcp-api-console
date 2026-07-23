@@ -172,7 +172,10 @@ usersApiRouter.post('/users/:ssoUser/copilot-seat', async (req, res) => {
 });
 
 usersApiRouter.delete('/users/:ssoUser/copilot-seat', async (req, res) => {
-  await sendAsync(res, 'remove-copilot-seat', { ssoUser: req.params.ssoUser }, () => removeCopilotSeatForSsoUser(req.params.ssoUser));
+  await sendAsync(res, 'remove-copilot-seat', { ssoUser: req.params.ssoUser }, async () => {
+    const result = await removeCopilotSeatForSsoUser(req.params.ssoUser);
+    return result.user;
+  });
 });
 
 async function sendAsync(res: import('express').Response, operation: string, fields: Record<string, unknown>, fn: () => Promise<unknown>, successStatus = 200): Promise<void> {

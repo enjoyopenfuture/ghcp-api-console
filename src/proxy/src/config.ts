@@ -1,5 +1,4 @@
 import 'dotenv/config';
-import { randomUUID } from 'node:crypto';
 
 export interface ProxyConfig {
   port: number;
@@ -13,27 +12,9 @@ export interface ProxyConfig {
   loginBaseUrl: string;
   enterpriseShortcode: string;
   requestStatsPerAccountLimit: number;
-  editorHeaders: EditorHeaders;
-  claudeCodeOptimizedEditorHeaders: ClaudeCodeOptimizedEditorHeaders;
-}
-
-export interface EditorHeaders {
-  'Editor-Version': string;
-  'Editor-Plugin-Version': string;
-  'User-Agent': string;
-  'X-GitHub-Api-Version': string;
-  'Copilot-Integration-Id': string;
-}
-
-export interface ClaudeCodeOptimizedEditorHeaders {
-  'VScode-SessionId': string;
-  'VScode-MachineId': string;
-  'Editor-Device-Id': string;
-  'X-GitHub-Api-Version': string;
-  'Copilot-Integration-Id': string;
-  'Editor-Version': string;
-  'Editor-Plugin-Version': string;
-  'User-Agent': string;
+  copilotApiBaseUrl: string;
+  opencodeUserAgent: string;
+  githubApiVersion: string;
 }
 
 export const config: ProxyConfig = {
@@ -48,28 +29,11 @@ export const config: ProxyConfig = {
   loginBaseUrl: process.env.LOGIN_BASE_URL ?? 'http://localhost:7003',
   enterpriseShortcode: readOptionalString(process.env.ENTERPRISE_SHORTCODE) ?? 'octo',
   requestStatsPerAccountLimit: readPositiveInteger(process.env.REQUEST_STATS_PER_ACCOUNT_LIMIT, 100),
-  editorHeaders: {
-    'Editor-Version': process.env.EDITOR_VERSION ?? 'vscode/1.95.0',
-    'Editor-Plugin-Version': process.env.EDITOR_PLUGIN_VERSION ?? 'copilot-chat/0.46.0',
-    'User-Agent': process.env.USER_AGENT ?? 'GitHubCopilotChat/0.46.0',
-    'X-GitHub-Api-Version': process.env.GITHUB_API_VERSION ?? '2026-01-09',
-    'Copilot-Integration-Id': process.env.COPILOT_INTEGRATION_ID ?? 'vscode-chat',
-  },
-  claudeCodeOptimizedEditorHeaders: {
-    'VScode-SessionId': readOptionalString(process.env.VSCODE_SESSION_ID) ?? cryptoRandomId(),
-    'VScode-MachineId': readOptionalString(process.env.VSCODE_MACHINE_ID) ?? cryptoRandomId(),
-    'Editor-Device-Id': readOptionalString(process.env.EDITOR_DEVICE_ID) ?? cryptoRandomId(),
-    'X-GitHub-Api-Version': readOptionalString(process.env.CLAUDE_CODE_GITHUB_API_VERSION) ?? '2026-01-09',
-    'Copilot-Integration-Id': readOptionalString(process.env.CLAUDE_CODE_COPILOT_INTEGRATION_ID) ?? 'vscode-chat',
-    'Editor-Version': readOptionalString(process.env.CLAUDE_CODE_EDITOR_VERSION) ?? process.env.EDITOR_VERSION ?? 'vscode/1.95.0',
-    'Editor-Plugin-Version': readOptionalString(process.env.CLAUDE_CODE_EDITOR_PLUGIN_VERSION) ?? process.env.EDITOR_PLUGIN_VERSION ?? 'copilot-chat/0.46.0',
-    'User-Agent': readOptionalString(process.env.CLAUDE_CODE_USER_AGENT) ?? process.env.USER_AGENT ?? 'GitHubCopilotChat/0.46.0',
-  },
+  copilotApiBaseUrl: readOptionalString(process.env.COPILOT_API_BASE_URL) ?? 'https://api.githubcopilot.com',
+  opencodeUserAgent: readOptionalString(process.env.OPENCODE_USER_AGENT)
+    ?? `opencode/${readOptionalString(process.env.OPENCODE_VERSION) ?? '1.0.0'}`,
+  githubApiVersion: readOptionalString(process.env.GITHUB_API_VERSION) ?? '2026-06-01',
 };
-
-function cryptoRandomId(): string {
-  return randomUUID();
-}
 
 function readPort(value: string | undefined, defaultValue: number): number {
   const parsed = Number(value ?? defaultValue);

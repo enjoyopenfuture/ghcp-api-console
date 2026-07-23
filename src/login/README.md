@@ -1,6 +1,6 @@
 # Login 服务
 
-`src/login` 是内部登录服务，负责把“需要刷新 GitHub token 的账号”转换成可执行的登录任务：通过 GitHub OAuth device flow 获取一次性设备码，使用 Playwright 自动完成 GitHub/SSO 登录授权，拿到 GitHub token 后回写给 `proxy` 服务。它不提供面向终端用户的 UI，也不直接代理 Copilot 请求；账号与 token 的最终状态由 `proxy` 维护。
+`src/login` 是内部登录服务，负责把“需要重新授权 Copilot OAuth 的账号”转换成可执行的登录任务：使用 OpenCode OAuth client 通过 GitHub Device Flow 获取一次性设备码，使用 Playwright 自动完成 GitHub/SSO 登录授权，拿到 OAuth token 后回写给 `proxy` 服务。它不提供面向终端用户的 UI，也不直接代理 Copilot 请求；账号与 token 的最终状态由 `proxy` 维护。
 
 ## 核心功能
 
@@ -8,8 +8,8 @@
 - **任务状态管理**：状态包括 `pending`、`running`、`success`、`failed`、`cancelled`；支持列表、分页搜索、查看、取消、删除、重试。服务重启时会把未完成的 `pending/running` 标记为失败。
 - **Device flow + Playwright 自动授权**：先请求 GitHub device code，再用 `playwright-extra` + stealth 插件打开验证页，处理 GitHub 账号选择、GitHub 登录、企业 SSO 中转、自定义 SSO 或 Azure SSO，最后轮询 access token。**这是最消耗资源的部分，单次登陆大约1分钟**。
 - **账号级日志与调试产物**：每个 SSO 用户有独立日志文件；可开启 debug 日志、失败截图和 trace。
-- **Token 回传 Proxy**：成功时调用 `proxy` 的 `/internal/accounts/:identity/gh-token` 保存 token；失败时调用 `/internal/accounts/:identity/mark-gh-token-failed` 标记失败。
-- **单账号调试命令**：`login:token` 可跳过任务队列，直接登录并把原始 GitHub token 输出到 stdout。
+- **Token 回传 Proxy**：成功时调用 `proxy` 的 `/internal/accounts/:identity/copilot-oauth-token` 保存 token；失败时调用 `/internal/accounts/:identity/mark-copilot-oauth-failed` 标记失败。
+- **单账号调试命令**：`login:copilot-oauth` 可跳过任务队列，直接登录并把原始 Copilot OAuth token 输出到 stdout。
 
 ## 启动方式
 
@@ -88,13 +88,10 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 | `PROXY_BASE_URL` | `http://localhost:3000` | 视环境 | Token 成功/失败回写的 proxy 地址；`.env.example` 当前未提供。 |
 | `LOGIN_CONCURRENCY` | `1` | 否 | 登录任务并发数，必须为正整数。 |
 | `LOG_DIR` | `./logs/login` | 否 | 账号级登录日志目录。 |
-| `CLIENT_ID` | `Iv1.b507a08c87ecfe98` | 否 | GitHub device flow 使用的 OAuth client id。 |
-| `SCOPE` | `read:user` | 否 | GitHub device flow 请求 scope。 |
-| `EDITOR_VERSION` | `vscode/1.124.2` | 否 | 请求 GitHub device/token 接口时附带的编辑器头。 |
-| `EDITOR_PLUGIN_VERSION` | `copilot-chat/0.52.0` | 否 | 同上。 |
-| `USER_AGENT` | `GitHubCopilotChat/0.52.0` | 否 | 同上。 |
-| `GITHUB_API_VERSION` | `2025-04-01` | 否 | 同上。 |
-| `COPILOT_INTEGRATION_ID` | `vscode-chat` | 否 | 同上。 |
+| `GITHUB_OAUTH_CLIENT_ID` | `Ov23li8tweQw6odWQebz` | 否 | OpenCode GitHub Device Flow OAuth client id。 |
+| `GITHUB_OAUTH_SCOPE` | `read:user` | 否 | GitHub Device Flow 请求 scope。 |
+| `OPENCODE_VERSION` | `1.0.0` | 否 | 生成 `User-Agent: opencode/<version>`。 |
+| `OPENCODE_USER_AGENT` | 当前未配置 | 否 | 显式覆盖完整 User-Agent；非空时优先于 `OPENCODE_VERSION`。 |
 | `SSO_URL` | 当前未配置 | 否 | 预期 SSO 地址；任务里的 `ssoUrl` 可覆盖。 |
 | `SSO_PROVIDER` | `custom` | 否 | `custom` 或 `azure`；队列任务实际按请求体 `ssoType` 选择 provider。 |
 | `AZURE_STAY_SIGNED_IN` | `false` | 否 | Azure “保持登录”提示选择 Yes/No。 |
@@ -147,6 +144,7 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
   ssoUser: string;         // SSO 用户名，必填
   ssoPassword: string;     // 成功执行必须提供；缺失时任务会失败
   ghLogin: string;         // GitHub 登录名，必填
+  oauthAttemptId: string;  // proxy 生成的授权代次；成功/失败回写必须匹配
   ssoType: 'custom' | 'azure';
   ssoUrl?: string;
   accountType?: 'business' | 'enterprise'; // 当前接收但 login 执行逻辑未使用
@@ -160,8 +158,8 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 
 - GitHub：调用 `https://github.com/login/device/code` 和 `https://github.com/login/oauth/access_token`。
 - Proxy：通过 `PROXY_BASE_URL` 调用内部接口：
-  - `PUT /internal/accounts/:identity/gh-token`，body `{ ghToken, ghLogin }`
-  - `POST /internal/accounts/:identity/mark-gh-token-failed`，body `{ failureReason }`
+  - `PUT /internal/accounts/:identity/copilot-oauth-token`，body `{ oauthAttemptId, copilotOauthToken, ghLogin }`
+  - `POST /internal/accounts/:identity/mark-copilot-oauth-failed`，body `{ oauthAttemptId, failureReason }`
 - Console/proxy 可通过共享 `X-Internal-Token` 访问 login；login 本身当前未提供浏览器 UI。
 
 ## 数据结构
@@ -176,6 +174,7 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 | `identity` | proxy 账号身份。 |
 | `sso_user` | SSO 用户。 |
 | `gh_login` | GitHub 登录名。 |
+| `oauth_attempt_id` | proxy 生成的授权代次，用于拒绝过期任务回写。 |
 | `sso_type` | `custom` 或 `azure`。 |
 | `status` | `pending/running/success/failed/cancelled`。 |
 | `attempts` | 执行次数，进入 running 时递增。 |

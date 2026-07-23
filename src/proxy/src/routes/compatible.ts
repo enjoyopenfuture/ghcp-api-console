@@ -3,7 +3,7 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import { apiError } from '@ghcp/shared';
 import { recordRequestStat } from '../db/requestStatsRepo.js';
 import { Logger } from '../logger.js';
-import { tokenManager, TokenNotReadyError } from '../copilot/tokenManager.js';
+import { copilotAuthManager, CopilotAuthNotReadyError } from '../copilot/copilotAuthManager.js';
 import {
   assertModelSupportsPath,
   CopilotApiError,
@@ -40,9 +40,12 @@ compatibleRouter.get('/v1/models', async (req, res) => {
   if (!identity) return;
   const claudeCodeOptimized = requireClaudeCodeOptimized(req, res);
   if (claudeCodeOptimized === undefined) return;
+  let accessToken: string | undefined;
   try {
-    const copilot = await tokenManager.getToken(identity);
-    const models = await listModels(copilot);
+    const copilot = await copilotAuthManager.getAuth(identity);
+    accessToken = copilot.accessToken;
+    const useCache = req.get('x-cache')?.trim().toLowerCase() !== 'false';
+    const models = await listModels(copilot, { useCache });
     const visibleModels = claudeCodeOptimized ? models.filter((m) => modelSupportsPath(m, '/v1/messages')) : models;
     recordRequestStat({ identity, path: '/v1/models', success: true });
     if (claudeCodeOptimized) {
@@ -57,6 +60,7 @@ compatibleRouter.get('/v1/models', async (req, res) => {
     }
     res.json({ object: 'list', data: visibleModels.map((m) => ({ object: 'model', owned_by: 'github-copilot', ...m })) });
   } catch (err) {
+    invalidateUnauthorizedAuth(identity, accessToken, err);
     recordRequestStat({ identity, path: '/v1/models', success: false, failureReason: errorMessage(err) });
     sendCompatibleError(req, res, err);
   }
@@ -121,7 +125,7 @@ async function handleForward(req: Request, res: Response, path: CopilotApiPath):
       return;
     }
     const model = typeof prepared.body.model === 'string' ? prepared.body.model : requestedModel;
-    const upstream = await forwardWithRetry(identity, path, prepared.body, model, prepared.forwardOptions);
+    const upstream = await forwardAuthenticated(identity, path, prepared.body, model, prepared.forwardOptions);
     await pipeAndRecord(upstream, res, { identity, path, model }, { ...prepared.pipeOptions, requestBody: prepared.body });
   } catch (err) {
     recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: errorMessage(err) });
@@ -149,7 +153,7 @@ async function handleCountTokens(req: Request, res: Response, claudeCodeOptimize
       return;
     }
     const model = typeof prepared.body.model === 'string' ? prepared.body.model : requestedModel;
-    const upstream = await forwardWithRetry(identity, path, prepared.body, model, prepared.forwardOptions);
+    const upstream = await forwardAuthenticated(identity, path, prepared.body, model, prepared.forwardOptions);
     if (isTokenCountFallbackStatus(upstream.status)) {
       await upstream.body?.cancel();
       const inputTokens = estimateInputTokens(prepared.body);
@@ -186,30 +190,23 @@ function prepareForward(
   };
 }
 
-async function forwardWithRetry(
+async function forwardAuthenticated(
   identity: string,
   path: CopilotApiPath,
   body: Record<string, unknown>,
   model: string,
   options?: ForwardCopilotRequestOptions,
 ): Promise<globalThis.Response> {
-  async function forwardOnce(copilot: Awaited<ReturnType<typeof tokenManager.getToken>>): Promise<globalThis.Response> {
-    await assertModelSupportsPath(copilot, path, model);
-    return forwardCopilotRequest(copilot, path, body, options);
-  }
-
-  let copilot = await tokenManager.getToken(identity);
-  let upstream: globalThis.Response;
+  const copilot = await copilotAuthManager.getAuth(identity);
   try {
-    upstream = await forwardOnce(copilot);
+    await assertModelSupportsPath(copilot, path, model);
   } catch (err) {
-    if (!(err instanceof CopilotApiError) || err.status !== 401) throw err;
-    copilot = await tokenManager.refreshCopilot(identity);
-    upstream = await forwardOnce(copilot);
+    invalidateUnauthorizedAuth(identity, copilot.accessToken, err);
+    throw err;
   }
+  const upstream = await forwardCopilotRequest(copilot, path, body, options);
   if (upstream.status === 401) {
-    copilot = await tokenManager.refreshCopilot(identity);
-    upstream = await forwardOnce(copilot);
+    copilotAuthManager.invalidate(identity, copilot.accessToken);
   }
   return upstream;
 }
@@ -542,7 +539,7 @@ function requireClaudeCodeOptimized(req: Request, res: Response): boolean | unde
 }
 
 function sendCompatibleError(req: Request, res: Response, err: unknown): void {
-  if (err instanceof TokenNotReadyError) {
+  if (err instanceof CopilotAuthNotReadyError) {
     res.status(err.status).json(apiError(err.code, err.message));
     return;
   }
@@ -600,4 +597,10 @@ function proxyErrorType(err: unknown): string {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function invalidateUnauthorizedAuth(identity: string, accessToken: string | undefined, err: unknown): void {
+  if (accessToken && err instanceof CopilotApiError && err.status === 401) {
+    copilotAuthManager.invalidate(identity, accessToken);
+  }
 }

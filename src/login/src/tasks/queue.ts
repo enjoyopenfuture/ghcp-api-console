@@ -2,7 +2,7 @@ import type { CreateLoginTaskRequest } from '@ghcp/shared';
 import { errorFields, loggerFor } from '@ghcp/shared';
 import { config } from '../config.js';
 import { markCancelled, createTask, getTask, type LoginTaskRecord } from '../db/tasksRepo.js';
-import { markGithubTokenFailed } from '../clients/proxyClient.js';
+import { markCopilotOauthFailed } from '../clients/proxyClient.js';
 import { runLoginTask, type RuntimeTaskPayload } from './runner.js';
 
 export class LoginQueue {
@@ -16,6 +16,7 @@ export class LoginQueue {
       identity: request.identity,
       ssoUser: request.ssoUser,
       ghLogin: request.ghLogin,
+      oauthAttemptId: request.oauthAttemptId,
       ssoType: request.ssoType,
     });
     this.pending.push({ ...request, taskId: task.id });
@@ -50,7 +51,19 @@ export class LoginQueue {
       void runLoginTask(task, payload)
         .catch(async (err: unknown) => {
           this.logger.error('failed', 'Login task failed', { taskId: payload.taskId, identity: payload.identity, ssoUser: payload.ssoUser, ghLogin: payload.ghLogin, ...errorFields(err) });
-          await markGithubTokenFailed(payload.identity, err instanceof Error ? err.message : String(err)).catch(() => undefined);
+          try {
+            await markCopilotOauthFailed(
+              payload.identity,
+              payload.oauthAttemptId,
+              err instanceof Error ? err.message : String(err),
+            );
+          } catch (syncErr) {
+            this.logger.error('proxy-status-sync-failed', 'Failed to mark Copilot OAuth authorization failed in Proxy', {
+              taskId: payload.taskId,
+              identity: payload.identity,
+              ...errorFields(syncErr),
+            });
+          }
         })
         .finally(() => {
           this.logger.info('finish', 'Login task finished', { taskId: payload.taskId, identity: payload.identity, ghLogin: payload.ghLogin });

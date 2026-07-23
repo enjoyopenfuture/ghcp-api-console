@@ -3,7 +3,7 @@ import { errorFields, loggerFor } from '@ghcp/shared';
 import { newBatchId, nowIso } from '@ghcp/shared';
 import { config } from '../config.js';
 import { hashPassword } from '../auth/password.js';
-import { assignCopilotSeat, removeCopilotSeat } from '../copilot/seats.js';
+import { assignCopilotSeat, CopilotSeatNotAssignedError, listCopilotSeatAssignments, removeCopilotSeat } from '../copilot/seats.js';
 import { getDb } from '../db/connection.js';
 import {
   createEmuImportPlanRecord,
@@ -26,6 +26,7 @@ import {
   toDto,
   updateEmu,
   updateCopilotSeat,
+  updateCopilotSeatFromGitHub,
   updateUser,
   type SsoUserRecord,
 } from '../db/usersRepo.js';
@@ -40,6 +41,16 @@ type PlannedEmuAction = 'create' | 'update' | 'skip';
 interface PlannedEmuImportRow extends ImportEmuUserRow {
   action?: PlannedEmuAction;
   scimUser?: ScimUserResource;
+}
+
+interface SsoUserOperationOutcome {
+  user?: SsoUserDto;
+  warning?: string;
+}
+
+interface CopilotSeatRemovalOutcome {
+  user: SsoUserRecord;
+  warning?: string;
 }
 
 export function ensureUser(identity: string, preferredSsoUser?: string): EnsureSsoUserResponse {
@@ -97,18 +108,18 @@ export function patchSsoUser(ssoUser: string, input: { password?: string; email?
   return user ? toDto(user) : undefined;
 }
 
-export async function deleteSsoUser(ssoUser: string): Promise<boolean> {
+export async function deleteSsoUser(ssoUser: string): Promise<{ deleted: boolean; warning?: string }> {
   const user = getUser(ssoUser);
-  if (!user) return false;
+  if (!user) return { deleted: false };
   logger.info('delete-user-start', 'Deleting SSO user', { ssoUser });
-  await removeCopilotSeatForUser(user);
+  const seatRemoval = await removeCopilotSeatForUser(user);
   await deleteProvisionedUser(user);
   const proxyDelete = await deleteProxyAccountsBySsoUser(user.ssoUser);
   logger.info('delete-user-proxy-cleaned', 'Deleted proxy data for SSO user', { ...proxyDelete });
   const deleted = deleteUser(ssoUser);
   if (deleted) appendUserEvent('delete', user);
   logger.info('delete-user-done', 'Deleted SSO user', { ssoUser, deleted });
-  return deleted;
+  return { deleted, warning: seatRemoval.warning };
 }
 
 export async function syncSsoUser(ssoUser: string, enterpriseRole?: ScimEnterpriseRole): Promise<SsoUserDto> {
@@ -136,14 +147,14 @@ export async function suspendSsoUser(ssoUser: string): Promise<SsoUserDto> {
   return toDto(updated);
 }
 
-export async function deleteEmuUser(ssoUser: string): Promise<SsoUserDto> {
+export async function deleteEmuUser(ssoUser: string): Promise<SsoUserOperationOutcome> {
   const user = requireUser(ssoUser);
   logger.info('delete-emu-start', 'Deleting provisioned GH login', { ssoUser, ghScimId: user.ghScimId });
-  await removeCopilotSeatForUser(user);
+  const seatRemoval = await removeCopilotSeatForUser(user);
   await deleteProvisionedUser(user);
   const updated = updateEmu(ssoUser, { emuStatus: 'not_synced' });
   logger.info('delete-emu-done', 'Deleted provisioned GH login', { ssoUser });
-  return toDto(updated);
+  return { user: toDto(updated), warning: seatRemoval.warning };
 }
 
 export async function assignCopilotSeatForSsoUser(ssoUser: string): Promise<SsoUserDto> {
@@ -153,11 +164,13 @@ export async function assignCopilotSeatForSsoUser(ssoUser: string): Promise<SsoU
   return toDto(updated);
 }
 
-export async function removeCopilotSeatForSsoUser(ssoUser: string): Promise<SsoUserDto> {
+export async function removeCopilotSeatForSsoUser(ssoUser: string): Promise<SsoUserOperationOutcome> {
   const user = requireUser(ssoUser);
-  const updated = await removeCopilotSeatForUser(user);
-  logger.info('remove-copilot-seat', 'Removed GitHub Copilot seat', { ssoUser, ghLogin: updated.ghLogin });
-  return toDto(updated);
+  const result = await removeCopilotSeatForUser(user);
+  if (!result.warning) {
+    logger.info('remove-copilot-seat', 'Removed GitHub Copilot seat', { ssoUser, ghLogin: result.user.ghLogin });
+  }
+  return { user: toDto(result.user), warning: result.warning };
 }
 
 export async function runSsoUserBatch(input: SsoUserBatchRequest): Promise<BatchResult<SsoUserBatchRow>> {
@@ -167,19 +180,20 @@ export async function runSsoUserBatch(input: SsoUserBatchRequest): Promise<Batch
   logger.info('batch-start', 'Starting SSO user batch operation', { operation: input.operation, total: ssoUsers.length, enterpriseRole: input.enterpriseRole });
   for (const ssoUser of ssoUsers) {
     try {
-      const user = await runSsoUserBatchRow(ssoUser, input);
-      rows.push({ ssoUser, status: 'success', detail: batchSuccessDetail(input.operation), user });
+      const outcome = await runSsoUserBatchRow(ssoUser, input);
+      rows.push({ ssoUser, status: 'success', detail: batchSuccessDetail(input.operation), user: outcome.user, warning: outcome.warning });
     } catch (err) {
       rows.push({ ssoUser, status: 'failed', detail: (err as Error).message });
     }
   }
   const failed = rows.filter((row) => row.status === 'failed').length;
-  logger.info('batch-done', 'Finished SSO user batch operation', { operation: input.operation, total: rows.length, success: rows.length - failed, failed });
+  const warnings = rows.filter((row) => row.warning).length;
+  logger.info('batch-done', 'Finished SSO user batch operation', { operation: input.operation, total: rows.length, success: rows.length - failed, warnings, failed });
   return {
     batchId: newBatchId(),
     startedAt,
     finishedAt: nowIso(),
-    summary: { total: rows.length, success: rows.length - failed, failed },
+    summary: { total: rows.length, success: rows.length - failed, warnings, failed },
     rows,
   };
 }
@@ -195,8 +209,9 @@ export async function importEmuUsers(input: ImportEmuUsersRequest = {}): Promise
 export async function createEmuImportPlan(input: CreateImportEmuPlanRequest = {}): Promise<ImportEmuPlanDto> {
   const targetSsoUser = input.ssoUser?.trim();
   const scimUsers = await loadScimUsersForImport(targetSsoUser);
+  const assignedCopilotGhLogins = scimUsers.length > 0 ? await listCopilotSeatAssignments() : new Set<string>();
   const plannedRows = scimUsers.length > 0
-    ? buildEmuImportPlan(scimUsers)
+    ? buildEmuImportPlan(scimUsers, assignedCopilotGhLogins)
     : [{ ssoUser: targetSsoUser ?? '', status: 'failed', detail: 'GH SCIM user was not found.' } satisfies PlannedEmuImportRow];
   const plan = createEmuImportPlanRecord({
     id: newBatchId(),
@@ -278,22 +293,22 @@ function requireUser(ssoUser: string): SsoUserRecord {
   return user;
 }
 
-async function runSsoUserBatchRow(ssoUser: string, input: SsoUserBatchRequest): Promise<SsoUserDto | undefined> {
+async function runSsoUserBatchRow(ssoUser: string, input: SsoUserBatchRequest): Promise<SsoUserOperationOutcome> {
   switch (input.operation) {
     case 'sync_emu':
-      return syncSsoUser(ssoUser, input.enterpriseRole);
+      return { user: await syncSsoUser(ssoUser, input.enterpriseRole) };
     case 'assign_copilot':
-      return assignCopilotSeatForSsoUser(ssoUser);
+      return { user: await assignCopilotSeatForSsoUser(ssoUser) };
     case 'remove_copilot':
       return removeCopilotSeatForSsoUser(ssoUser);
     case 'suspend_emu':
-      return suspendSsoUser(ssoUser);
+      return { user: await suspendSsoUser(ssoUser) };
     case 'delete_emu':
       return deleteEmuUser(ssoUser);
     case 'delete_sso': {
-      const deleted = await deleteSsoUser(ssoUser);
-      if (!deleted) throw new Error(`SSO user "${ssoUser}" was not found.`);
-      return undefined;
+      const result = await deleteSsoUser(ssoUser);
+      if (!result.deleted) throw new Error(`SSO user "${ssoUser}" was not found.`);
+      return { warning: result.warning };
     }
   }
 }
@@ -345,15 +360,25 @@ async function assignCopilotSeatForUser(user: SsoUserRecord, ghLogin = user.ghLo
   }
 }
 
-async function removeCopilotSeatForUser(user: SsoUserRecord): Promise<SsoUserRecord> {
+async function removeCopilotSeatForUser(user: SsoUserRecord): Promise<CopilotSeatRemovalOutcome> {
   if (!user.ghLogin) {
     logger.info('remove-copilot-seat-skipped', 'SSO user has no GH login for Copilot seat removal', { ssoUser: user.ssoUser });
-    return updateCopilotSeat(user.ssoUser, { status: 'unassigned', lastOperation: 'remove' });
+    return { user: updateCopilotSeat(user.ssoUser, { status: 'unassigned', lastOperation: 'remove' }) };
   }
   try {
     await removeCopilotSeat(user.ghLogin);
-    return updateCopilotSeat(user.ssoUser, { status: 'unassigned', lastOperation: 'remove' });
+    return { user: updateCopilotSeat(user.ssoUser, { status: 'unassigned', lastOperation: 'remove' }) };
   } catch (err) {
+    if (err instanceof CopilotSeatNotAssignedError) {
+      const warning = `GitHub user "${user.ghLogin}" has no Copilot seat; seat removal was skipped.`;
+      const updated = updateCopilotSeat(user.ssoUser, { status: 'unassigned', lastOperation: 'remove' });
+      logger.warn('remove-copilot-seat-not-assigned', warning, {
+        ssoUser: updated.ssoUser,
+        ghLogin: user.ghLogin,
+        githubStatus: err.status,
+      });
+      return { user: updated, warning };
+    }
     const updated = updateCopilotSeat(user.ssoUser, { status: 'remove_failed', lastOperation: 'remove', lastError: errorMessage(err) });
     logger.error('remove-copilot-seat-failed', 'Failed to remove GitHub Copilot seat', { ssoUser: updated.ssoUser, ghLogin: user.ghLogin, ...errorFields(err) });
     throw err;
@@ -389,8 +414,8 @@ function listAllStoredEmuImportPlanRows(planId: string): ImportEmuUserRow[] {
   }
 }
 
-function buildEmuImportPlan(scimUsers: ScimUserResource[]): PlannedEmuImportRow[] {
-  const candidates = scimUsers.map(toPlannedCandidate);
+function buildEmuImportPlan(scimUsers: ScimUserResource[], assignedCopilotGhLogins: ReadonlySet<string>): PlannedEmuImportRow[] {
+  const candidates = scimUsers.map((scimUser) => toPlannedCandidate(scimUser, assignedCopilotGhLogins));
   const duplicateSsoUsers = duplicateValues(candidates.filter(hasScimUser).map((row) => row.ssoUser));
   const localUsers = listAllUsers();
   const localBySsoUser = new Map(localUsers.map((user) => [user.ssoUser.toLowerCase(), user]));
@@ -417,16 +442,26 @@ function buildEmuImportPlan(scimUsers: ScimUserResource[]): PlannedEmuImportRow[
       };
     }
     if (!existing) {
-      return { ...candidate, action: 'create', status: 'pending_create', detail: 'Will create SSO user; password will default to ssoUser.' };
+      return {
+        ...candidate,
+        action: 'create',
+        status: 'pending_create',
+        detail: `Will create SSO user; password will default to ssoUser. Copilot seat: ${candidate.copilotSeatStatus}.`,
+      };
     }
     if (isAlreadyAligned(existing, candidate)) {
-      return { ...candidate, action: 'skip', status: 'skipped', detail: 'SSO user is already aligned with GH SCIM.' };
+      return { ...candidate, action: 'skip', status: 'skipped', detail: 'SSO user and Copilot seat are already aligned with GH.' };
     }
-    return { ...candidate, action: 'update', status: 'pending_update', detail: 'Will update email and GH login metadata.' };
+    return {
+      ...candidate,
+      action: 'update',
+      status: 'pending_update',
+      detail: `Will update local GH metadata and Copilot seat status to ${candidate.copilotSeatStatus}.`,
+    };
   });
 }
 
-function toPlannedCandidate(scimUser: ScimUserResource): PlannedEmuImportRow {
+function toPlannedCandidate(scimUser: ScimUserResource, assignedCopilotGhLogins: ReadonlySet<string>): PlannedEmuImportRow {
   if (!scimUser.id) {
     return {
       ssoUser: ssoUserFromScimUser(scimUser),
@@ -447,12 +482,14 @@ function toPlannedCandidate(scimUser: ScimUserResource): PlannedEmuImportRow {
   }
   const ghLogin = ghLoginFromScimUser(scimUser, ssoUser);
   const emuStatus = scimUser.active === false ? 'suspended' : 'active';
+  const copilotSeatStatus = assignedCopilotGhLogins.has(ghLogin.toLowerCase()) ? 'assigned' : 'unassigned';
   return {
     ssoUser,
     email: primaryEmail(scimUser) || `${ssoUser}@${config.emailDomain}`,
     ghLogin,
     ghScimId: scimUser.id,
     emuStatus,
+    copilotSeatStatus,
     status: 'pending_update',
     detail: '',
     scimUser,
@@ -467,12 +504,15 @@ function applyStoredEmuImportRow(row: EmuImportPlanRowRecord, localBySsoUser: Ma
 
 function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
   if (row.action === 'skip' || row.status === 'conflict' || row.status === 'failed') return toImportRow(row);
-  if (!row.ghScimId || !row.ghLogin || !row.email || !row.emuStatus) return { ...toImportRow(row), status: 'failed', detail: 'Import plan row is incomplete.' };
+  if (!row.ghScimId || !row.ghLogin || !row.email || !row.emuStatus || !row.copilotSeatStatus) {
+    return { ...toImportRow(row), status: 'failed', detail: 'Import plan row is incomplete.' };
+  }
   if (row.action === 'create') {
     const password = row.ssoUser;
     const { passwordHash, salt } = hashPassword(password);
     const created = createUser({ ssoUser: row.ssoUser, passwordHash, salt, email: row.email, role: 'user' });
-    const updated = updateEmu(created.ssoUser, { ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
+    updateEmu(created.ssoUser, { ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
+    const updated = updateCopilotSeatFromGitHub(created.ssoUser, row.copilotSeatStatus);
     appendUserEvent('import_emu_create', updated);
     logger.info('import-emu-user-created', 'Recreated SSO user from GH SCIM user', { ssoUser: row.ssoUser, ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
     return {
@@ -482,13 +522,15 @@ function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
       ghScimId: updated.ghScimId,
       emuStatus: updated.emuStatus,
       status: 'created',
-      detail: 'Created SSO user from GH SCIM; password defaults to ssoUser. Copilot seat status remains unknown.',
+      copilotSeatStatus: row.copilotSeatStatus,
+      detail: `Created SSO user from GH SCIM; password defaults to ssoUser. Copilot seat: ${updated.copilotSeatStatus}.`,
       passwordForLogin: password,
     };
   }
   if (row.action === 'update') {
     updateUser(row.ssoUser, { email: row.email });
-    const updated = updateEmu(row.ssoUser, { ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
+    updateEmu(row.ssoUser, { ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
+    const updated = updateCopilotSeatFromGitHub(row.ssoUser, row.copilotSeatStatus);
     logger.info('import-emu-user-updated', 'Updated SSO user from GH SCIM user', { ssoUser: row.ssoUser, ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
     return {
       ...toImportRow(row),
@@ -497,14 +539,15 @@ function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
       ghScimId: updated.ghScimId,
       emuStatus: updated.emuStatus,
       status: 'updated',
-      detail: 'Updated SSO user from GH SCIM. Copilot seat status was not changed.',
+      copilotSeatStatus: row.copilotSeatStatus,
+      detail: `Updated SSO user from GH SCIM. Copilot seat: ${updated.copilotSeatStatus}.`,
     };
   }
   return { ...toImportRow(row), status: 'failed', detail: 'Import plan row has no applicable action.' };
 }
 
 function staleConflictForRow(row: EmuImportPlanRowRecord, localBySsoUser: Map<string, SsoUserRecord>, localByScimId: Map<string, SsoUserRecord>): string | undefined {
-  if (!row.ghScimId || !row.ghLogin || !row.email || !row.emuStatus) return 'Import plan row is incomplete.';
+  if (!row.ghScimId || !row.ghLogin || !row.email || !row.emuStatus || !row.copilotSeatStatus) return 'Import plan row is incomplete.';
   const existing = localBySsoUser.get(row.ssoUser.toLowerCase());
   const boundLocalUser = localByScimId.get(row.ghScimId);
   if (boundLocalUser && boundLocalUser.ssoUser.toLowerCase() !== row.ssoUser.toLowerCase()) {
@@ -525,6 +568,7 @@ function toImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
     ghLogin: row.ghLogin,
     ghScimId: row.ghScimId,
     emuStatus: row.emuStatus,
+    copilotSeatStatus: row.copilotSeatStatus,
     status: row.status,
     detail: row.detail,
     passwordForLogin: row.passwordForLogin,
@@ -558,7 +602,8 @@ function isAlreadyAligned(existing: SsoUserRecord, row: PlannedEmuImportRow): bo
   return existing.email === row.email
     && existing.ghLogin === row.ghLogin
     && existing.ghScimId === row.ghScimId
-    && existing.emuStatus === row.emuStatus;
+    && existing.emuStatus === row.emuStatus
+    && existing.copilotSeatStatus === row.copilotSeatStatus;
 }
 
 function batchResult(startedAt: string, rows: ImportEmuUserRow[]): BatchResult<ImportEmuUserRow> {

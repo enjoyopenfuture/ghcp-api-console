@@ -1,14 +1,14 @@
 # `src/` 项目总览
 
-`src/` 是本仓库的核心实现：把 GitHub Copilot 包装成一个可被内部系统调用的 LLM API Provider。它对外提供 OpenAI/Anthropic/Responses 兼容接口，对内拆分账号、SSO/EMU、GitHub 登录、Copilot token、请求统计和后台运维能力。
+`src/` 是本仓库的核心实现：把 GitHub Copilot 包装成一个可被内部系统调用的 LLM API Provider。它对外提供 OpenAI/Anthropic/Responses 兼容接口，对内拆分账号、SSO/EMU、OpenCode Copilot OAuth、请求统计和后台运维能力。
 
 详细实现请看各模块 README：
 
 | 模块 | 说明 |
 | --- | --- |
-| [`proxy`](./proxy/README.md) | 面向调用方的 Copilot API 代理；负责 API Key、identity、GitHub/Copilot token、请求转发和统计。 |
+| [`proxy`](./proxy/README.md) | 面向调用方的 Copilot API 代理；负责 API Key、identity、Copilot OAuth、请求转发和统计。 |
 | [`sso`](./sso/README.md) | 本地 SSO/SAML IdP、SSO 用户管理、GitHub SCIM/EMU 同步、Copilot seat 和 AI Credits 用量。 |
-| [`login`](./login/README.md) | GitHub OAuth device flow + Playwright 自动登录服务；成功后把 GitHub token 回写给 proxy。 |
+| [`login`](./login/README.md) | OpenCode OAuth Device Flow + Playwright 自动登录服务；成功后把 Copilot OAuth token 回写给 proxy。 |
 | [`console`](./console/README.md) | React + Express 管理控制台；登录后统一操作 proxy/sso/login 的内部 API。 |
 | `mock-github` | 本地 GitHub SCIM mock，供开发时模拟 EMU provisioning。 |
 | `packages/shared` | 跨服务共享 DTO、API error、HTTP client、logger、ID、时间和脱敏工具。 |
@@ -18,7 +18,7 @@
 系统按“对外流量”和“内部运维流量”拆分：
 
 - **业务调用流量**只进入 `proxy`。调用方携带 `API_KEY` 和身份头，`proxy` 负责找到或初始化该身份对应的账号，再转发到 GitHub Copilot API。
-- **账号初始化**由 `proxy` 协调。未知 identity 首次请求通常返回 `202 account_initializing`，后台由 `proxy` 调 `sso` 确保 SSO 用户/同步 EMU，再由 `proxy` 调 `login` 创建登录任务；`login` 成功后把 GitHub token 回写给 `proxy`。
+- **账号初始化**由 `proxy` 协调。未知 identity 首次请求通常返回 `202 account_initializing`，后台由 `proxy` 调 `sso` 确保 SSO 用户/同步 EMU，再由 `proxy` 调 `login` 创建登录任务；`login` 成功后把 Copilot OAuth token 回写给 `proxy`。
 - **后台运维流量**进入 `console`。浏览器只访问 `/api/console/**`，由 console 服务端补充 `X-Internal-Token` 后转发给 `proxy`、`sso`、`login`。
 - **跨服务契约**集中在 `packages/shared/src/contracts.ts` 和 `api.ts`，避免各服务重复定义 DTO、分页、批处理和错误结构。
 
@@ -40,12 +40,10 @@
       |                                                 v
       |                                      GitHub device flow + browser SSO login
       |
-      |<---------------- GitHub token write-back -------|
-      |
-    refresh copilot token  
+      |<------------- Copilot OAuth token write-back ---|
       |
       v
-  GitHub Copilot APIs
+  GitHub Copilot APIs (direct Bearer)
 
 --------------------- another view ---------------------------------
 
@@ -177,10 +175,10 @@ curl http://localhost:8002/healthz
 
 | 路径 | 说明 |
 | --- | --- |
-| `/api/accounts*` | 查询账号、导入 GitHub token、刷新 GitHub/Copilot token。 |
+| `/api/accounts*` | 查询账号、验证并导入 Copilot OAuth token、发起重新授权。 |
 | `/api/request-stats` | 查看最近请求统计。 |
-| `/internal/accounts/:identity/gh-token` | `login` 成功后回写 GitHub token。 |
-| `/internal/accounts/:identity/mark-gh-token-failed` | `login` 失败后标记 token failed。 |
+| `/internal/accounts/:identity/copilot-oauth-token` | `login` 成功后回写 Copilot OAuth token。 |
+| `/internal/accounts/:identity/mark-copilot-oauth-failed` | `login` 失败后标记 OAuth authorization failed。 |
 | `/internal/accounts/by-sso-user/:ssoUser` | `sso` 删除用户时清理 proxy 账号和统计。 |
 
 边界：`proxy` 不在 OpenAI、Anthropic、Responses 请求体之间互转；调用方必须把请求发到匹配的路径。未知 identity 会先触发初始化并返回 202。
@@ -253,12 +251,12 @@ Console 自身接口：
 
 | 类型 | 归属 | 用途 |
 | --- | --- | --- |
-| `ProxyAccountDto` | `proxy` | identity 与 SSO/GitHub/Copilot token 状态，不包含原始 token。 |
+| `ProxyAccountDto` | `proxy` | identity、SSO/GH 映射和 Copilot OAuth 状态，不包含原始 token。 |
 | `ProxyRequestStatDto` | `proxy` | 一次 LLM 请求的路径、模型、成功状态、失败原因和 token 用量。 |
 | `SsoUserDto` | `sso` | SSO 用户、email、role、GH login/SCIM id、EMU 状态、Copilot seat 状态。 |
 | `ImportEmuPlanDto`、`ImportEmuUserRow` | `sso` | 从 SCIM 反向导入 EMU 用户的预览计划与行结果。 |
 | `AiCreditsUsageDto` | `sso` | 企业 AI Credits 上月/本月用量、预测用量、seat 数量和成本。 |
-| `CreateLoginTaskRequest` | `login` | 创建登录任务所需 identity、SSO 用户、密码、GH login、SSO 类型。 |
+| `CreateLoginTaskRequest` | `login` | 创建登录任务所需 identity、SSO 用户、密码、GH login、OAuth attempt id 和 SSO 类型。 |
 | `LoginTaskDto` | `login` | 登录任务状态、尝试次数、失败原因、日志路径和时间戳。 |
 
 各服务本地持久化：
@@ -275,7 +273,7 @@ Console 自身接口：
 
 | 枚举 | 值 |
 | --- | --- |
-| `GhTokenStatus` / `CopilotTokenStatus` | `valid`、`expired`、`missing`、`refreshing`、`failed` |
+| `CopilotOauthStatus` | `valid`、`expired`、`missing`、`refreshing`、`failed` |
 | `EmuStatus` | `active`、`suspended`、`deleted`、`not_synced` |
 | `CopilotSeatStatus` | `unknown`、`assigned`、`unassigned`、`assign_failed`、`remove_failed` |
 | `LoginTaskStatus` | `pending`、`running`、`success`、`failed`、`cancelled` |
@@ -287,7 +285,7 @@ Console 自身接口：
 src/
   proxy/
     src/server.ts                 # Express app、公共兼容 API、/api、/internal
-    src/copilot/                  # token 状态机、Copilot token exchange、请求转发
+    src/copilot/                  # Copilot OAuth 凭据、模型缓存和请求转发
     src/db/                       # proxy_accounts、proxy_request_stats
   sso/
     src/server.ts                 # SAML 公开路由、/api 内部路由
@@ -319,7 +317,7 @@ src/
 - **改登录流程**：优先通过 `login` 的 `AUTH_*_SELECTOR` 和 debug 配置验证；确认是流程变化后再改 `HeadlessPlaywrightAuthStrategy.ts`。
 - **排查转发问题**：从 `console` Network 看 `/api/console/**`，再看 `[console:api-proxy]` 日志和上游服务日志。
 - **排查账号初始化**：看 `proxy` 的 token manager 日志、`sso_users`、`login_tasks`、`proxy_accounts` 四处状态是否一致。
-- **敏感信息**：不要提交 `.env`、SQLite 数据库、管理员文件、登录日志、GitHub token、SSO 密码或 trace 截图。
+- **敏感信息**：不要提交 `.env`、SQLite 数据库、管理员文件、登录日志、Copilot OAuth token、SSO 密码或 trace 截图。
 
 ## 9. 构建与检查
 

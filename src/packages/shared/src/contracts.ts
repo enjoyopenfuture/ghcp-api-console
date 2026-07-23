@@ -1,5 +1,4 @@
-export type GhTokenStatus = 'valid' | 'expired' | 'missing' | 'refreshing' | 'failed';
-export type CopilotTokenStatus = 'valid' | 'expired' | 'missing' | 'refreshing' | 'failed';
+export type CopilotOauthStatus = 'valid' | 'expired' | 'missing' | 'refreshing' | 'failed';
 export type EmuStatus = 'active' | 'suspended' | 'deleted' | 'not_synced';
 export type CopilotSeatStatus = 'unknown' | 'assigned' | 'unassigned' | 'assign_failed' | 'remove_failed';
 export type CopilotSeatOperation = 'assign' | 'remove';
@@ -16,24 +15,27 @@ export interface ProxyAccountDto {
   identity: string;
   ssoUser: string;
   ghLogin?: string;
-  ghTokenStatus: GhTokenStatus;
-  ghTokenUpdatedAt?: string;
-  copilotTokenStatus: CopilotTokenStatus;
-  copilotTokenExpiresAt?: string;
+  copilotOauthStatus: CopilotOauthStatus;
+  copilotOauthUpdatedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface ImportGithubTokensRequest {
+export interface DeleteProxyAccountResult {
+  identity: string;
+  deletedRequestStats: number;
+}
+
+export interface ImportCopilotOauthTokensRequest {
   csvText: string;
 }
 
-export type ImportGithubTokenRowStatus = 'success' | 'failed';
+export type ImportCopilotOauthTokenRowStatus = 'success' | 'failed';
 
-export interface ImportGithubTokenRow {
+export interface ImportCopilotOauthTokenRow {
   line: number;
   name: string;
-  status: ImportGithubTokenRowStatus;
+  status: ImportCopilotOauthTokenRowStatus;
   detail: string;
   account?: ProxyAccountDto;
 }
@@ -93,6 +95,7 @@ export interface SsoUserBatchRow {
   ssoUser: string;
   status: SsoUserBatchRowStatus;
   detail: string;
+  warning?: string;
   user?: SsoUserDto;
 }
 
@@ -115,6 +118,7 @@ export interface ImportEmuUserRow {
   ghLogin?: string;
   ghScimId?: string;
   emuStatus?: EmuStatus;
+  copilotSeatStatus?: 'assigned' | 'unassigned';
   status: ImportEmuUserStatus;
   detail: string;
   passwordForLogin?: string;
@@ -166,6 +170,7 @@ export interface CreateLoginTaskRequest {
   ssoUser: string;
   ssoPassword: string;
   ghLogin: string;
+  oauthAttemptId: string;
   ssoType: SsoType;
   ssoUrl?: string;
   accountType?: AccountType;
@@ -177,6 +182,7 @@ export interface LoginTaskDto {
   identity: string;
   ssoUser: string;
   ghLogin?: string;
+  oauthAttemptId?: string;
   ssoType: SsoType;
   status: LoginTaskStatus;
   attempts: number;

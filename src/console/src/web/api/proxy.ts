@@ -1,4 +1,4 @@
-import type { BatchResult, ImportGithubTokenRow, PageResponse, ProxyAccountDto, ProxyRequestStatDto, SsoType } from '@ghcp/shared';
+import type { BatchResult, DeleteProxyAccountResult, ImportCopilotOauthTokenRow, PageResponse, ProxyAccountDto, ProxyRequestStatDto, SsoType } from '@ghcp/shared';
 import { api } from './client.js';
 
 export interface ListProxyAccountsQuery {
@@ -33,6 +33,10 @@ export function getProxyAccount(identity: string): Promise<ProxyAccountDto> {
   return api<ProxyAccountDto>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}`);
 }
 
+export function deleteProxyAccount(identity: string): Promise<DeleteProxyAccountResult> {
+  return api<DeleteProxyAccountResult>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}`, { method: 'DELETE' });
+}
+
 export function listRequestStats(params: { identity?: string; limit?: number } = {}): Promise<ProxyRequestStatDto[]> {
   const search = new URLSearchParams();
   if (params.limit) search.set('limit', String(params.limit));
@@ -42,16 +46,12 @@ export function listRequestStats(params: { identity?: string; limit?: number } =
   return api<ProxyRequestStatDto[]>(`/api/console/proxy/request-stats${query(search)}`);
 }
 
-export function refreshCopilotToken(identity: string): Promise<ProxyAccountDto | undefined> {
-  return api<ProxyAccountDto | undefined>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}/copilot-token/refresh`, { method: 'POST', body: JSON.stringify({}) });
+export function reauthorizeCopilotOauth(identity: string, body: { ssoPassword: string; ssoType: SsoType }): Promise<ProxyAccountDto | undefined> {
+  return api<ProxyAccountDto | undefined>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}/copilot-oauth/reauthorize`, { method: 'POST', body: JSON.stringify(body) });
 }
 
-export function refreshGithubToken(identity: string, body: { ssoPassword: string; ssoType: SsoType }): Promise<ProxyAccountDto | undefined> {
-  return api<ProxyAccountDto | undefined>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}/gh-token/refresh`, { method: 'POST', body: JSON.stringify(body) });
-}
-
-export function importGithubTokens(csvText: string): Promise<BatchResult<ImportGithubTokenRow>> {
-  return api<BatchResult<ImportGithubTokenRow>>('/api/console/proxy/accounts/gh-token/import', {
+export function importCopilotOauthTokens(csvText: string): Promise<BatchResult<ImportCopilotOauthTokenRow>> {
+  return api<BatchResult<ImportCopilotOauthTokenRow>>('/api/console/proxy/accounts/copilot-oauth-token/import', {
     method: 'POST',
     body: JSON.stringify({ csvText }),
   });

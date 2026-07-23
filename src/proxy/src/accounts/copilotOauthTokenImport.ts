@@ -1,12 +1,13 @@
-import type { BatchResult, ImportGithubTokenRow } from '@ghcp/shared';
+import type { BatchResult, ImportCopilotOauthTokenRow } from '@ghcp/shared';
 import { HttpApiError, newBatchId, nowIso } from '@ghcp/shared';
 import { getSsoUser } from '../clients/ssoClient.js';
-import { importGithubToken, toAccountDto } from '../db/accountsRepo.js';
+import { clearModelsCache, CopilotApiError, validateCopilotOauthToken } from '../copilot/copilotClient.js';
+import { importCopilotOauthToken, toAccountDto } from '../db/accountsRepo.js';
 
 interface ImportRow {
   line: number;
   name: string;
-  githubToken: string;
+  copilotOauthToken: string;
 }
 
 interface ParseError {
@@ -15,12 +16,12 @@ interface ParseError {
   error: string;
 }
 
-export async function importGithubTokens(csvText: string): Promise<BatchResult<ImportGithubTokenRow>> {
+export async function importCopilotOauthTokens(csvText: string): Promise<BatchResult<ImportCopilotOauthTokenRow>> {
   const startedAt = nowIso();
-  const parsed = parseGithubTokenCsv(csvText);
-  const rows: ImportGithubTokenRow[] = [];
+  const parsed = parseCopilotOauthTokenCsv(csvText);
+  const rows: ImportCopilotOauthTokenRow[] = [];
   for (const row of parsed.rows) {
-    rows.push(await importGithubTokenRow(row));
+    rows.push(await importCopilotOauthTokenRow(row));
   }
   for (const error of parsed.errors) {
     rows.push({
@@ -41,20 +42,24 @@ export async function importGithubTokens(csvText: string): Promise<BatchResult<I
   };
 }
 
-async function importGithubTokenRow(row: ImportRow): Promise<ImportGithubTokenRow> {
+async function importCopilotOauthTokenRow(row: ImportRow): Promise<ImportCopilotOauthTokenRow> {
   try {
     const ssoUser = await getSsoUser(row.name);
-    const account = importGithubToken({
+    await validateCopilotOauthToken(row.name, row.copilotOauthToken);
+    const account = importCopilotOauthToken({
       identity: row.name,
       ssoUser: ssoUser.ssoUser,
       ghLogin: ssoUser.ghLogin ?? row.name,
-      ghToken: row.githubToken,
+      copilotOauthToken: row.copilotOauthToken,
     });
+    clearModelsCache(row.name);
     return {
       line: row.line,
       name: row.name,
       status: 'success',
-      detail: ssoUser.ghLogin ? 'GitHub token imported and existing token was overwritten.' : 'GitHub token imported with name as GH login fallback; sync SSO to GH to confirm ghLogin.',
+      detail: ssoUser.ghLogin
+        ? 'Copilot OAuth token was validated and imported.'
+        : 'Copilot OAuth token was validated and imported with name as GH login fallback; sync SSO to GH to confirm ghLogin.',
       account: toAccountDto(account),
     };
   } catch (err) {
@@ -69,17 +74,22 @@ async function importGithubTokenRow(row: ImportRow): Promise<ImportGithubTokenRo
 
 function importErrorMessage(err: unknown, name: string): string {
   if (err instanceof HttpApiError && err.status === 404) return `SSO user "${name}" was not found. Create it manually in SSO Users before importing this token.`;
+  if (err instanceof CopilotApiError && err.status === 401) return 'Copilot OAuth token validation failed: token is invalid or expired.';
+  if (err instanceof CopilotApiError && err.status === 403) return 'Copilot OAuth token validation failed: account has no Copilot access or is blocked by organization policy.';
+  if (err instanceof CopilotApiError) return `Copilot OAuth token validation failed: ${err.message}`;
   return err instanceof Error ? err.message : String(err);
 }
 
-function parseGithubTokenCsv(text: string): { rows: ImportRow[]; errors: ParseError[] } {
+function parseCopilotOauthTokenCsv(text: string): { rows: ImportRow[]; errors: ParseError[] } {
   const rows: ImportRow[] = [];
   const errors: ParseError[] = [];
   const seen = new Set<string>();
   let headerChecked = false;
+  let headerValid = false;
   text.replace(/^\uFEFF/, '').split(/\r?\n/).forEach((rawLine, index) => {
     const line = index + 1;
     if (!rawLine.trim()) return;
+    if (headerChecked && !headerValid) return;
     let values: string[];
     try {
       values = parseCsvLine(rawLine);
@@ -90,23 +100,24 @@ function parseGithubTokenCsv(text: string): { rows: ImportRow[]; errors: ParseEr
     if (!headerChecked) {
       headerChecked = true;
       if (!isHeader(values)) {
-        errors.push({ line, name: values[0]?.trim() ?? '', error: 'CSV header must be exactly: name,githubToken' });
+        errors.push({ line, name: values[0]?.trim() ?? '', error: 'CSV header must be exactly: name,copilotOauthToken' });
         return;
       }
+      headerValid = true;
       return;
     }
     if (values.length !== 2) {
-      errors.push({ line, name: values[0]?.trim() ?? '', error: 'Expected two columns: name,githubToken' });
+      errors.push({ line, name: values[0]?.trim() ?? '', error: 'Expected two columns: name,copilotOauthToken' });
       return;
     }
     const name = values[0]!.trim();
-    const githubToken = values[1]!.trim();
+    const copilotOauthToken = values[1]!.trim();
     if (!name) {
       errors.push({ line, name, error: 'name is required.' });
       return;
     }
-    if (!githubToken) {
-      errors.push({ line, name, error: 'githubToken is required.' });
+    if (!copilotOauthToken) {
+      errors.push({ line, name, error: 'copilotOauthToken is required.' });
       return;
     }
     const key = name.toLowerCase();
@@ -115,9 +126,9 @@ function parseGithubTokenCsv(text: string): { rows: ImportRow[]; errors: ParseEr
       return;
     }
     seen.add(key);
-    rows.push({ line, name, githubToken });
+    rows.push({ line, name, copilotOauthToken });
   });
-  if (!headerChecked) errors.push({ line: 1, name: '', error: 'CSV header is required: name,githubToken' });
+  if (!headerChecked) errors.push({ line: 1, name: '', error: 'CSV header is required: name,copilotOauthToken' });
   return { rows, errors };
 }
 
@@ -148,5 +159,5 @@ function parseCsvLine(line: string): string[] {
 function isHeader(values: string[]): boolean {
   return values.length === 2
     && values[0]!.trim() === 'name'
-    && values[1]!.trim() === 'githubToken';
+    && values[1]!.trim() === 'copilotOauthToken';
 }

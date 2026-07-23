@@ -10,7 +10,8 @@ interface TaskRow {
   id: string;
   identity: string;
   sso_user: string;
-  gh_login?: string;
+  gh_login: string | null;
+  oauth_attempt_id: string | null;
   sso_type: SsoType;
   status: LoginTaskStatus;
   attempts: number;
@@ -21,15 +22,23 @@ interface TaskRow {
   finished_at?: string;
 }
 
-export function createTask(input: { identity: string; ssoUser: string; ghLogin: string; ssoType: SsoType; logPath?: string }): LoginTaskRecord {
+export function createTask(input: {
+  identity: string;
+  ssoUser: string;
+  ghLogin: string;
+  oauthAttemptId: string;
+  ssoType: SsoType;
+  logPath?: string;
+}): LoginTaskRecord {
   const id = newTaskId();
   const now = nowIso();
   getDb()
     .prepare(`
-      INSERT INTO login_tasks (id, identity, sso_user, gh_login, sso_type, status, attempts, log_path, created_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+      INSERT INTO login_tasks (
+        id, identity, sso_user, gh_login, oauth_attempt_id, sso_type, status, attempts, log_path, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
     `)
-    .run(id, input.identity, input.ssoUser, input.ghLogin, input.ssoType, input.logPath, now);
+    .run(id, input.identity, input.ssoUser, input.ghLogin, input.oauthAttemptId, input.ssoType, input.logPath, now);
   return getTask(id)!;
 }
 
@@ -117,7 +126,8 @@ function mapRow(row: TaskRow): LoginTaskRecord {
     id: row.id,
     identity: row.identity,
     ssoUser: row.sso_user,
-    ghLogin: row.gh_login,
+    ghLogin: row.gh_login ?? undefined,
+    oauthAttemptId: row.oauth_attempt_id ?? undefined,
     ssoType: row.sso_type,
     status: row.status,
     attempts: row.attempts,
