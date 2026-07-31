@@ -12,6 +12,11 @@ export interface ProxyConfig {
   loginBaseUrl: string;
   enterpriseShortcode: string;
   requestStatsPerAccountLimit: number;
+  errorDiagnosticsEnabled: boolean;
+  errorDiagnosticsDir: string;
+  errorDiagnosticsRedact: boolean;
+  errorDiagnosticsMaxFileBytes: number;
+  errorDiagnosticsMaxFiles: number;
   copilotApiBaseUrl: string;
   opencodeUserAgent: string;
   githubApiVersion: string;
@@ -29,6 +34,11 @@ export const config: ProxyConfig = {
   loginBaseUrl: process.env.LOGIN_BASE_URL ?? 'http://localhost:7003',
   enterpriseShortcode: readOptionalString(process.env.ENTERPRISE_SHORTCODE) ?? 'octo',
   requestStatsPerAccountLimit: readPositiveInteger(process.env.REQUEST_STATS_PER_ACCOUNT_LIMIT, 100),
+  errorDiagnosticsEnabled: readBoolean(process.env.PROXY_ERROR_DIAGNOSTICS_ENABLED, true),
+  errorDiagnosticsDir: readOptionalString(process.env.PROXY_ERROR_DIAGNOSTICS_DIR) ?? './data/error-diagnostics',
+  errorDiagnosticsRedact: readBoolean(process.env.PROXY_ERROR_DIAGNOSTICS_REDACT, false),
+  errorDiagnosticsMaxFileBytes: readPositiveInteger(process.env.PROXY_ERROR_DIAGNOSTICS_MAX_FILE_MB, 50) * 1024 * 1024,
+  errorDiagnosticsMaxFiles: readPositiveInteger(process.env.PROXY_ERROR_DIAGNOSTICS_MAX_FILES, 5),
   copilotApiBaseUrl: readOptionalString(process.env.COPILOT_API_BASE_URL) ?? 'https://api.githubcopilot.com',
   opencodeUserAgent: readOptionalString(process.env.OPENCODE_USER_AGENT)
     ?? `opencode/${readOptionalString(process.env.OPENCODE_VERSION) ?? '1.0.0'}`,

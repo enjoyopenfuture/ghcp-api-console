@@ -4,7 +4,7 @@ import cookieSession from 'cookie-session';
 import { apiError } from '@ghcp/shared';
 import { config } from './config.js';
 import { requireAdmin, session } from './auth.js';
-import { isInitialized, setupAdmin, verifyAdmin } from './adminsStore.js';
+import { changeAdminPassword, isInitialized, setupAdmin, verifyAdmin } from './adminsStore.js';
 import { serviceProxy } from './apiProxy.js';
 
 export function buildApp(): express.Express {
@@ -43,6 +43,30 @@ export function buildApp(): express.Express {
   });
   app.get('/api/console/me', requireAdmin, (req, res) => {
     res.json(session(req).admin);
+  });
+  app.patch('/api/console/password', requireAdmin, (req, res) => {
+    const { currentPassword, newPassword } = (req.body ?? {}) as {
+      currentPassword?: unknown;
+      newPassword?: unknown;
+    };
+    if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || !newPassword) {
+      res.status(400).json(apiError('invalid_password_change', 'currentPassword and newPassword are required.'));
+      return;
+    }
+    if (currentPassword === newPassword) {
+      res.status(400).json(apiError('invalid_password_change', 'New password must be different from the current password.'));
+      return;
+    }
+    try {
+      const username = session(req).admin!.username;
+      if (!changeAdminPassword(username, currentPassword, newPassword)) {
+        res.status(401).json(apiError('invalid_current_password', 'Current password is incorrect.'));
+        return;
+      }
+      res.status(204).end();
+    } catch (err) {
+      res.status(500).json(apiError('password_change_failed', err instanceof Error ? err.message : String(err)));
+    }
   });
   app.use('/api/console/proxy', requireAdmin, serviceProxy('proxy', '/api/console/proxy'));
   app.use('/api/console/sso', requireAdmin, serviceProxy('sso', '/api/console/sso'));

@@ -11,6 +11,7 @@ Proxy 位于客户端与 GitHub Copilot 后端之间，负责：
 - 按用户身份（默认请求头 `X-User-Identity`）维护账号、Token 状态和请求统计。
 - 分别连接 SSO 服务与 Login 服务：未知身份会触发 SSO 用户确保、EMU 同步，并由 Proxy 创建 Login 任务；手动重新授权 Copilot OAuth 也会创建 Login 任务。
 - 通过 SQLite 持久化账号、Copilot OAuth token 与最近请求统计。
+- 对 Copilot 上游 HTTP、网络和流读取错误保存完整诊断现场，并通过 Console 查看、下载或清空。
 
 ## 2. 核心功能
 
@@ -24,6 +25,7 @@ Proxy 位于客户端与 GitHub Copilot 后端之间，负责：
 | 模型与路径校验 | `src/copilot/copilotClient.ts` | 使用 OAuth bearer 读取 `/models`，判断模型是否适用于当前 API 路径；缓存按 identity 隔离 1 小时，失败时可短期使用旧缓存。 |
 | 请求转发 | `src/routes/compatible.ts` | 使用 OpenCode headers 转发 JSON/SSE 响应；上游 401 时清除 OAuth token 并要求重新授权。 |
 | 请求统计 | `src/db/requestStatsRepo.ts` | 记录路径、模型、成功/失败、失败原因、输入/输出/cache token；按账号保留最近 N 条。 |
+| 错误诊断 | `src/diagnostics/*` | 保存原始入站请求、实际转发请求和上游错误响应；使用有界轮转的人类可读日志，可选递归脱敏。 |
 | Claude Code 优化 | `src/routes/claudeCodeMode.ts`、`src/routes/claudeCodeCompat.ts`、`src/routes/anthropicModelProfiles.ts` | 可选开启，对 `/v1/messages*` 做 Anthropic/Claude Code 兼容处理、模型规范化和 profile 驱动的 thinking/effort 修正；支持请求头覆盖默认模式。 |
 
 当前提供基于 Node test runner 的认证/迁移/路由测试和 `start:prod` 脚本；Dockerfile 未声明 `EXPOSE`/`HEALTHCHECK`。
@@ -89,6 +91,11 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 | `LOGIN_BASE_URL` | `http://localhost:7003` / 同 | 否 | Login 服务地址；用于创建 Copilot OAuth 重新授权任务。 |
 | `ENTERPRISE_SHORTCODE` | `octo` / `octo` | 否 | 初始化身份时从规范化 identity 末尾剥离 `_<shortcode>`，生成 SSO 用户名。 |
 | `REQUEST_STATS_PER_ACCOUNT_LIMIT` | `100` / `100` | 否 | 每个 identity 保留的请求统计条数；必须为正整数。 |
+| `PROXY_ERROR_DIAGNOSTICS_ENABLED` | `true` / `true` | 否 | 是否保存 Copilot 上游失败诊断。关闭后控制台错误摘要仍会输出。 |
+| `PROXY_ERROR_DIAGNOSTICS_DIR` | `./data/error-diagnostics` / 同 | 否 | 轮转文本日志目录；Compose 使用 `/data/error-diagnostics`。 |
+| `PROXY_ERROR_DIAGNOSTICS_REDACT` | `false` / `false` | 否 | 是否脱敏敏感 headers 和 JSON 字段。默认不脱敏，会保存凭据与完整用户内容。 |
+| `PROXY_ERROR_DIAGNOSTICS_MAX_FILE_MB` | `50` / `50` | 否 | 单个诊断文件目标上限 MB；必须为正整数。超大单条记录保持完整。 |
+| `PROXY_ERROR_DIAGNOSTICS_MAX_FILES` | `5` / `5` | 否 | 包含当前文件在内的最大轮转文件数；必须为正整数。 |
 | `COPILOT_API_BASE_URL` | `https://api.githubcopilot.com` / 同 | 否 | GitHub.com Copilot API base URL。 |
 | `OPENCODE_VERSION` | `1.0.0` / `1.18.4` | 否 | 生成 `User-Agent: opencode/<version>`。 |
 | `OPENCODE_USER_AGENT` | 未设置 / 未设置 | 否 | 显式覆盖完整 User-Agent；非空时优先于 `OPENCODE_VERSION`。 |
@@ -100,7 +107,22 @@ Proxy 当前没有 runtime settings 表、Settings 页面字段或 `/api/setting
 
 `REQUEST_STATS_PER_ACCOUNT_LIMIT` 是 env-only 的数据保留策略：每次写入统计后清理当前 identity 的旧记录，服务启动时还会对所有 identity 清理一次。代码默认值和 `src/proxy/.env.example` 都是 `100`；根 `.env.example` 当前显式设置为 `2`，因此直接复制根模板启动 Compose 时实际保留 2 条。该值必须是正整数。
 
+错误诊断同样是 env-only。默认启用并写入 `diagnostics.log`、`diagnostics.1.log` 等轮转文件；Compose 的目录位于现有 `proxy-data` volume，容器重启后仍保留。每条记录直接列出 headers、格式化后的 JSON/text body、入站请求和实际上游请求的 curl 命令。`PROXY_ERROR_DIAGNOSTICS_REDACT=false` 时，文件会原样包含 API Key、Copilot Authorization、用户 prompt、工具参数和响应内容，必须限制 volume、备份和 Console 管理员权限。设置为 `true` 后会脱敏敏感 headers，并递归脱敏可安全解析的 JSON；无法安全脱敏的非 JSON 或不完整 body 不写正文。
+
 根 `.env` 还包含其他服务的变量，但 Proxy 只读取上表项目。Docker Compose 只会把 `docker-compose.yml` 中 Proxy `environment` 明确列出的变量传入容器。
+
+### 日志等级与错误诊断
+
+`LOG_LEVEL` 是最低控制台日志等级：
+
+| 设置 | 控制台输出 | 推荐场景 |
+| --- | --- | --- |
+| `debug` | debug、info、warn、error | 短时间排障；会额外打印经过常规 logger 脱敏的入站 headers。 |
+| `info` | info、warn、error | 生产默认，能看到常规操作、上游 4xx 和严重故障。 |
+| `warn` | warn、error | 只关注异常；仍能看到上游 4xx/5xx。 |
+| `error` | error | 仅严重故障；上游 4xx 警告会被隐藏，不建议常态使用。 |
+
+无效值和未设置都按 `info` 处理。完整错误现场是否落盘由 `PROXY_ERROR_DIAGNOSTICS_ENABLED` 独立控制，不要求开启 `debug`；脱敏开关也只影响诊断文件，不改变普通 logger 的脱敏。
 
 ## 5. 接口与 API 边界
 
@@ -181,7 +203,14 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 | 上游 Copilot 返回 401/403 | 返回对应 `401` / `403`。 |
 | 其他上游或转发错误 | 通常返回 `502 api_error`。 |
 
-当 Copilot 上游返回 4xx/5xx 时，Proxy 会输出一条 `WARN upstream-error` 控制台日志，包含 identity、path、model、上游状态码、content-type，以及上游请求/响应 body 的字节数。日志不会输出 prompt、tool result 或上游响应正文，避免把代码片段、用户输入或凭据写入控制台。
+当 Copilot 上游失败时，Proxy 只在常规控制台输出一行摘要，并提供 `diagnosticId` 与诊断文件关联：
+
+- 上游 HTTP 4xx 使用 `WARN upstream-http-error`。
+- 上游 HTTP 5xx、fetch/network/abort 和响应流读取失败使用 `ERROR`。
+- 摘要包含 identity、path、model、状态码、上游 URL 和 body 字节数，不输出完整正文。
+- 诊断文件记录原始入站 method/URL/raw headers/raw body、转换后实际发送的 URL/headers/body，以及上游 status/headers/body 或异常 stack。
+- `/v1/messages/count_tokens` 遇到 404/405/501 后即使成功使用本地估算，也会记录该次上游失败。
+- 响应诊断最多捕获 20 MB 并标记截断；入站请求沿用 Express 的 20 MB JSON 上限，压缩请求保存解压前原始字节。
 
 ### 5.4 管理接口 `/api/*`
 
@@ -196,6 +225,10 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 | `GET` | `/api/accounts/:identity/request-stats?limit=` | `limit` 默认 100，最大 1000 | `ProxyRequestStatDto[]`。 |
 | `GET` | `/api/request-stats?limit=` | 同上 | 跨账号最近请求统计。 |
 | `POST` | `/api/accounts/:identity/copilot-oauth/reauthorize` | `{ ssoPassword: string, ssoType?: "azure" | "custom" }`；`ssoPassword` 必填 | 标记 OAuth `refreshing` 并创建 Login 任务，返回 `ProxyAccountDto`。 |
+| `GET` | `/api/error-diagnostics?page=&pageSize=` | 分页参数可选，`pageSize` 最大 100 | `ProxyErrorDiagnosticsListResponse`，只返回摘要并指明功能是否开启、是否脱敏。 |
+| `GET` | `/api/error-diagnostics/:id` | 诊断 UUID | `ProxyErrorDiagnosticDetailDto`，包含摘要字段和完整人类可读日志；不存在返回 404，功能关闭返回 503。 |
+| `GET` | `/api/error-diagnostics/:id/download` | 诊断 UUID | 以 `Content-Disposition: attachment` 下载 `.log` 文本。 |
+| `DELETE` | `/api/error-diagnostics` | `{ confirm: true }` | 原子清空全部轮转文件；未确认返回 400。 |
 
 ### 5.5 服务间接口 `/internal/*`
 
@@ -242,7 +275,20 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 
 索引：`idx_proxy_request_stats_identity_time(identity, requested_at DESC)`。每次写入后会按 `REQUEST_STATS_PER_ACCOUNT_LIMIT` 清理该账号旧记录；服务启动时也会清理一次。
 
-### 6.2 主要领域对象
+### 6.2 错误诊断文本日志
+
+诊断不写入 SQLite。`ErrorDiagnosticsStore` 串行化 append/rotate/clear，确保并发错误不会交错写入；列表按最新记录优先扫描轮转文件，并忽略进程异常退出留下的不完整记录。每条记录使用明确的 BEGIN/END 标记，正文包含：
+
+- `failureKind`: `http`、`fetch` 或 `stream`；
+- identity、兼容 API path、model 和时间；
+- 客户端原始 method、URL、按顺序保留并逐行显示的 headers、格式化 body 和 curl；
+- 实际发送给 Copilot 的 method、URL、生成后的 headers、格式化 body 和 curl；
+- 上游 status、headers、完整或截断的 body；
+- transport/stream 异常的 name、message、stack 和 cause。
+
+普通 JSON、text、SSE 等 body 直接以 UTF-8 明文保存，可解析 JSON 会缩进格式化。只有压缩或二进制 body 才标记编码并使用 base64。管理页面直接预览同一文本记录，下载文件与磁盘 `.log` 内容一致。
+
+### 6.3 主要领域对象
 
 | 对象 | 来源 | 用途 |
 | --- | --- | --- |
@@ -251,6 +297,7 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 | `CopilotAuthContext` | `src/copilot/copilotAuth.ts` | identity、OAuth access token 和 Copilot API endpoint。 |
 | `ModelInfo` | `src/copilot/copilotClient.ts` | Copilot `/models` 返回的模型对象，保留额外元数据。 |
 | `ProxyRequestStatDto` | `@ghcp/shared` | 请求统计返回结构。 |
+| `ProxyErrorDiagnosticRecordDto` | `@ghcp/shared` | 完整错误现场；summary/list DTO 用于 Console 分页。 |
 | `BatchResult<T>` / `ImportCopilotOauthTokenRow` | `@ghcp/shared` | CSV 验证并导入 Copilot OAuth token 的批处理结果。 |
 | `EnsureSsoUserRequest/Response`、`SsoUserDto` | `@ghcp/shared` | Proxy 调 SSO 服务初始化/查询用户。 |
 | `CreateLoginTaskRequest`、`LoginTaskDto` | `@ghcp/shared` | Proxy 调 Login 服务创建登录/刷新任务。 |
@@ -282,6 +329,7 @@ src/proxy/
     │   └── copilotClient.ts     # Copilot 模型列表、路径校验、转发 headers
     ├── clients/                 # SSO/Login 服务 JSON client
     ├── accounts/                # Copilot OAuth token 验证与 CSV 导入
+    ├── diagnostics/             # 错误现场构造、人类可读格式、轮转文本 store 与测试
     └── db/                      # SQLite 连接、迁移、accounts/stats repo
 ```
 
@@ -291,7 +339,7 @@ src/proxy/
 
 - 看入口：从 `src/index.ts` -> `src/server.ts` 开始，先理解路由挂载顺序：`/healthz` 无鉴权，`/api` 和 `/internal` 走内部鉴权，其余公共请求先 API Key 再 identity。
 - 排查账号初始化：看 `copilotAuthManager.getAuth()`；未知 identity 的第一次请求通常返回 202，同时后台创建 SSO/Login 流程。
-- 排查转发失败：看 `compatible.ts` 的 `handleForward()`、`forwardAuthenticated()` 和 `copilotClient.assertModelSupportsPath()`。
+- 排查转发失败：先从控制台错误摘要取得 `diagnosticId`，在 Console **Error Diagnostics** 查看/下载现场，再看 `compatible.ts` 的 `handleForward()`、`forwardAuthenticated()` 和 `copilotClient.assertModelSupportsPath()`。
 - 排查 Claude Code：确认 `CLAUDE_CODE_OPTIMIZED=true`，再看 `claudeCodeCompat.ts` 的 body 预处理、token count fallback 和 Files/WebSearch 错误适配。
 - 排查数据：优先查看管理接口 `/api/accounts`、`/api/request-stats`；不要在响应中暴露数据库内的原始 Token。
 - 扩展新 Copilot 路径时，至少同步更新 `COPILOT_FORWARD_PATHS`、`compatible.ts` 路由、模型路径推断、`ProxyRequestStatDto.path`、SQLite 统计语义和本文档。

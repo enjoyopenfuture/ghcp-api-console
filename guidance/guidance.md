@@ -232,6 +232,11 @@ CONSOLE_PORT=7004
 | `IDENTITY_HEADER_REQUIRED` | `true` | 建议保持 `true`；设为 `false` 且请求缺 header 时会使用共享的 `default` identity。 |
 | `CLAUDE_CODE_OPTIMIZED` | Compose 默认 `true`；代码默认 `false` | Proxy 的 Claude Code/Anthropic Messages 默认兼容模式；单个请求可用 `X-Claude-Code-Optimized` 覆盖。 |
 | `REQUEST_STATS_PER_ACCOUNT_LIMIT` | 根模板为 `2`；代码和 Compose fallback 为 `100` | 每个 identity 保留的最近请求统计数，必须为正整数。直接复制当前根模板时实际只保留 2 条。 |
+| `PROXY_ERROR_DIAGNOSTICS_ENABLED` | `true` | 是否保存 Copilot 上游 HTTP、网络和响应流失败现场。 |
+| `PROXY_ERROR_DIAGNOSTICS_DIR` | Compose 为 `/data/error-diagnostics` | 人类可读诊断日志目录；默认位于 `proxy-data` volume。 |
+| `PROXY_ERROR_DIAGNOSTICS_REDACT` | `false` | 是否脱敏敏感 headers 和 JSON 字段；默认不脱敏。 |
+| `PROXY_ERROR_DIAGNOSTICS_MAX_FILE_MB` | `50` | 单个轮转文件目标上限 MB。 |
+| `PROXY_ERROR_DIAGNOSTICS_MAX_FILES` | `5` | 包含当前文件在内的最大文件数。 |
 | `GITHUB_OAUTH_CLIENT_ID` | OpenCode client id | Login Device Flow 使用的 OAuth client id；除非明确更换兼容 client，否则保持模板值。 |
 | `GITHUB_OAUTH_SCOPE` | `read:user` | Login Device Flow 请求的 scope。 |
 | `COPILOT_API_BASE_URL` | `https://api.githubcopilot.com` | Proxy 直接访问 Copilot API 的 base URL。 |
@@ -252,7 +257,9 @@ CONSOLE_PORT=7004
 | `SSO_DEFAULT_USER_PASSWORD` | 空 | 新建 SSO 用户未显式提供密码时使用；为空会退回使用 `ssoUser` 作为密码，只适合受控验证环境。生产环境应设置强值，或为真实用户配置独立密码。修改该变量不会更新现有用户的密码 hash，轮换时必须同步修改用户密码。 |
 | `LOG_LEVEL` | `info` | 所有服务的结构化日志等级：`debug`、`info`、`warn`、`error`。 |
 
-`API_KEY`、`INTERNAL_API_TOKEN`、`SESSION_SECRET`、`SCIM_TOKEN`、PAT 和默认密码都属于敏感启动配置，不应放到 Console Settings、仓库、截图或日志中。
+`API_KEY`、`INTERNAL_API_TOKEN`、`SESSION_SECRET`、`SCIM_TOKEN`、PAT 和默认密码都属于敏感启动配置，不应放到 Console Settings、仓库、截图或普通日志中。错误诊断默认不脱敏，会有意保存这些请求现场；应通过 volume 权限、备份策略和 Console 管理员权限保护。
+
+生产环境建议保持 `LOG_LEVEL=info`：这样能看到上游 4xx 的 `warn` 和 5xx/网络/流错误的 `error`。`debug` 只在短时间排障时启用；`LOG_LEVEL=error` 会隐藏上游 4xx，不建议常态使用。错误诊断落盘与 `LOG_LEVEL` 无关，即使使用 `info` 也会按 `PROXY_ERROR_DIAGNOSTICS_ENABLED` 保存完整现场。
 
 
 ### 6.2 生成 SAML 证书
@@ -592,7 +599,7 @@ Docker Compose 使用以下持久化位置：
 
 | Volume/挂载 | 内容 | 敏感性 |
 | --- | --- | --- |
-| `proxy-data` | `proxy.sqlite`：identity 映射、Copilot OAuth token、OAuth 状态和请求统计。 | 高 |
+| `proxy-data` | `proxy.sqlite`，以及 `error-diagnostics/*.log`：identity/token/统计和完整上游失败现场。 | 高 |
 | `sso-data` | `sso.sqlite`、SSO runtime settings、用户密码哈希、预算缓存和用户事件日志。 | 高 |
 | `login-data` | `login.sqlite`：任务历史和 Login runtime settings。 | 中 |
 | `login-logs` | 账号登录日志、失败截图和 Playwright trace。 | 高 |
@@ -602,6 +609,8 @@ Docker Compose 使用以下持久化位置：
 `docker compose down` 默认保留 named volumes；`docker compose down -v` 会删除上述业务数据，不要在未备份时执行。SQLite 使用 WAL 模式，备份时应停止对应写入服务或使用 SQLite-aware backup，不能在服务运行时只复制主 `.sqlite` 文件而忽略 WAL。恢复后应同时检查文件权限、证书和 `.env` 密钥是否匹配。
 
 当前 SQLite、Login 内存队列和 settings cache 都按单实例设计。不要把 WAL SQLite 文件直接放到多节点 NFS/RWX 卷共享；水平扩容前需要先完成数据库访问、任务领取和缓存失效的多实例改造。
+
+Proxy 错误诊断默认每文件 50 MB、最多 5 个文件，按大小轮转。单条记录可能因同时包含原始请求和转换后的请求而超过 50 MB，此时会完整保存，并在下一次写入时轮转。清理记录可在 Console **Error Diagnostics** 页面执行；备份或复制 `proxy-data` 时应假定其中含有可直接使用的 API Key、Copilot token 和用户内容。
 
 ## 12. GHCP API Console 页面使用说明
 
@@ -694,11 +703,35 @@ Login Tasks 页面展示 `login` 服务的自动登录任务。
 
 ### 12.7 Settings
 
-Settings 页面用于修改第 6.5 节列出的 SSO 和 Login runtime Settings，不需要重启对应服务。保存时使用版本号进行乐观锁；如果页面数据已经过期，会提示冲突，此时刷新后再修改。
+Settings 页面包含 Console administrator password、SSO runtime settings 和 Login runtime settings。
+
+修改 Console 管理员密码时必须输入当前密码、新密码和确认密码。保存成功后，新密码立即用于后续登录，当前浏览器 session 保持登录；密码会以新的随机 salt 和 scrypt hash 写回 `ADMINS_FILE`，不会保存明文。
+
+SSO 和 Login runtime Settings 对应第 6.5 节，不需要重启对应服务。保存时使用版本号进行乐观锁；如果页面数据已经过期，会提示冲突，此时刷新后再修改。
 
 这些值缓存在各服务进程内。当前多实例部署不会自动广播缓存失效，因此不能把 Settings 页面视为已具备多节点一致性的配置中心。
 
-### 12.8 Diagnostics
+### 12.8 Error Diagnostics
+
+Error Diagnostics 页面用于排查 Copilot 上游错误。Proxy 在以下场景生成记录：
+
+- Copilot 返回 HTTP 4xx/5xx；
+- fetch 连接、DNS、网络或 abort 失败；
+- JSON/SSE/其他响应流读取中断；
+- `/v1/messages/count_tokens` 上游返回 404/405/501，随后使用本地估算。
+
+控制台常规日志只输出摘要和 `diagnosticId`。页面列表按最新优先显示时间、identity、path、model、失败类型、状态码和 body 大小；打开详情可直接阅读逐行 headers、格式化 JSON/text body、可复制 curl、客户端原始请求、Claude Code 兼容处理后实际发送的请求，以及上游响应/异常。页面预览为避免浏览器卡顿会限制长度，**Download** 下载完整 `.log`。**Clear all** 会删除所有轮转文件且不可恢复。
+
+默认 `PROXY_ERROR_DIAGNOSTICS_REDACT=false`，因此详情和下载可能包含：
+
+- 客户端 API Key、identity header 和其他原始 headers；
+- 发往 Copilot 的 Authorization bearer；
+- 完整 prompt、代码、工具参数和 tool result；
+- 上游错误响应和异常 stack。
+
+如果环境不能通过其他方式保证文件和管理员访问安全，请设置 `PROXY_ERROR_DIAGNOSTICS_REDACT=true` 并重启 Proxy。脱敏开启后，敏感 headers 和 JSON key 会递归替换；无法安全解析的非 JSON、不完整或截断 body 不保存正文。该开关不影响常规 logger 自身的脱敏。
+
+### 12.9 Diagnostics
 
 Diagnostics 页面用于检查 `proxy`、`sso`、`login-service` 连通性，以及内部 token 是否匹配。当前截图集中没有单独的 Diagnostics 图，但正式排查时建议优先使用它确认服务间基础链路。
 
@@ -839,6 +872,7 @@ curl http://localhost:3000/responses \
 - `.env`
 - SQLite 数据库
 - 日志
+- Proxy `error-diagnostics` 文本日志和从 Console 下载的诊断 `.log`
 - Playwright trace / debug artifact
 - Copilot OAuth token
 - SCIM token
@@ -892,6 +926,8 @@ curl http://localhost:3000/responses \
 | 请求返回 401 | `API_KEY` 错误；使用了错误的认证头；内部 token 不一致 | 公共 API 检查 `Authorization` / `x-api-key`；console/内部 API 检查 `INTERNAL_API_TOKEN`。 |
 | 请求返回 missing identity | 未带 `X-User-Identity`；自定义了 `IDENTITY_HEADER` 但客户端未同步 | 检查 proxy `.env` 和客户端请求头。 |
 | 模型不可用 | 模型不支持目标 API path；账号不可见该模型；`CLAUDE_CODE_OPTIMIZED` 影响 `/v1/models` 返回 | 先调用 `/v1/models`，再按返回模型选择 `/v1/messages`、`/responses` 或 `/chat/completions`。 |
+| Copilot 上游返回 4xx/5xx 或 502 | 请求参数、账号权限、Copilot 服务或网络异常 | 从 proxy 日志取得 `diagnosticId`，在 Error Diagnostics 对比原始请求、实际转发请求和上游响应；大记录下载 JSON。 |
+| Error Diagnostics 为空 | 诊断被关闭；错误发生在本地鉴权/校验而非 Copilot 上游；记录已轮转或清空 | 检查 `PROXY_ERROR_DIAGNOSTICS_ENABLED`，确认错误类型，再检查诊断目录和轮转配置。 |
 | Copilot OAuth 授权失败 | SSO 密码或 SAML 流程不正确；用户没有 seat；OAuth client/scope 配置错误；GitHub 页面或后端变化 | 检查 `GITHUB_OAUTH_CLIENT_ID`、`GITHUB_OAUTH_SCOPE`、seat 状态和 Login task 日志，然后在 Proxy Accounts 重新授权。 |
 | 原本有效的 Copilot OAuth 变为 `expired` | Copilot API 返回未授权，Proxy 已使当前 token 失效 | 确认用户 seat 和组织策略仍有效，再从 Proxy Accounts 重新授权或导入新的 Copilot OAuth token。 |
 
@@ -917,5 +953,6 @@ curl http://localhost:3000/responses \
 16. Login Tasks 中测试登录任务为 `success`。
 17. `/v1/models` 能返回模型列表。
 18. `/v1/messages` 或 `/responses` 能成功返回模型响应。
+19. 制造一次受控的 Copilot 上游错误后，proxy 日志能输出 `diagnosticId`，Error Diagnostics 能查看并下载对应记录。
 
 完成以上检查后，本项目的 GitHub Enterprise EMU、SSO、SCIM、Copilot seat、自动登录和 API proxy 主链路即已跑通。

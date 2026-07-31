@@ -26,7 +26,7 @@
 - 使用自定义 SSO/SAML IdP 结合 GitHub EMU，通过 SCIM 批量创建和同步 GitHub 账号，避免手工注册大量普通 GitHub 账号。
 - 使用 OpenCode OAuth client 发起 GitHub Device Flow，并由 Playwright 自动完成 GitHub/SSO 登录。
 - 通过 Proxy 统一维护 `identity -> ssoUser -> ghLogin -> token` 映射，并对外提供兼容 API。
-- 支持验证后批量导入 OpenCode Copilot OAuth token，也支持后台控制台查看账号、请求统计、登录任务、AI Credits 和 Copilot seat 状态。
+- 支持验证后批量导入 OpenCode Copilot OAuth token，也支持后台控制台查看账号、请求统计、上游错误诊断、登录任务、AI Credits 和 Copilot seat 状态。
 - 在 Proxy 层包含 Claude Code / Anthropic Messages 相关兼容优化。
 
 整体调用链：
@@ -101,7 +101,7 @@ Login runtime settings：
 | `authDebugLogs` | `false` | boolean | 为新启动任务写入详细账号日志。 |
 | `authDebugArtifacts` | `false` | boolean | 为新启动任务保存截图和 trace 等调试产物。 |
 
-`REQUEST_STATS_PER_ACCOUNT_LIMIT` 仍是 Proxy 环境变量，不属于 runtime Settings；它控制每个 identity 保留的请求统计条数。Login task 历史目前没有自动保留条数/天数配置，终态任务会一直保留，直到通过 Console 或 API 手动删除。
+`REQUEST_STATS_PER_ACCOUNT_LIMIT` 和 `PROXY_ERROR_DIAGNOSTICS_*` 仍是 Proxy 环境变量，不属于 runtime Settings；前者控制每个 identity 保留的请求统计条数，后者控制上游失败现场的启用、目录、脱敏和文件轮转。Login task 历史目前没有自动保留条数/天数配置，终态任务会一直保留，直到通过 Console 或 API 手动删除。
 
 ## 快速启动（Docker Compose）
 
@@ -133,6 +133,10 @@ cp .env.example .env
 | `IDENTITY_HEADER_REQUIRED` | 调用方身份 header 是否必填；默认 `true`。如果设置为 false，则 Identity header 可选。identity header 为空时，默认使用匿名身份。当前匿名用户为 `default` |
 | `CLAUDE_CODE_OPTIMIZED` | Proxy 的默认 Claude Code 优化模式；代码默认 `false`，Compose 默认和根模板均为 `true`。 |
 | `REQUEST_STATS_PER_ACCOUNT_LIMIT` | 每个 identity 保留的请求统计数；代码和 Compose fallback 为 `100`，根 `.env.example` 当前显式设置为 `2`。 |
+| `PROXY_ERROR_DIAGNOSTICS_ENABLED` | 是否保存 Copilot 上游失败现场；默认 `true`。 |
+| `PROXY_ERROR_DIAGNOSTICS_DIR` | 人类可读诊断日志目录；Compose 默认 `/data/error-diagnostics`，位于 `proxy-data` volume。 |
+| `PROXY_ERROR_DIAGNOSTICS_REDACT` | 是否脱敏诊断中的敏感 headers 和 JSON 字段；默认 `false`，即保留原始凭据和请求内容。 |
+| `PROXY_ERROR_DIAGNOSTICS_MAX_FILE_MB` / `PROXY_ERROR_DIAGNOSTICS_MAX_FILES` | 轮转上限；默认每文件 `50 MB`、保留 `5` 个文件。 |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_SCOPE` | Login 使用的 OpenCode OAuth client 和 Device Flow scope。 |
 | `OPENCODE_VERSION` / `OPENCODE_USER_AGENT` | Login 与 Proxy 请求使用的 OpenCode User-Agent；显式 User-Agent 优先。 |
 | `COPILOT_API_BASE_URL` | Copilot API 地址；GitHub.com 默认 `https://api.githubcopilot.com`。 |
@@ -173,7 +177,7 @@ npm run validate:health
 http://localhost:7004
 ```
 
-首次访问会创建本地控制台管理员。之后可以在控制台管理 SSO 用户、EMU 同步、Proxy 账号、登录任务、Copilot OAuth 重授权/导入和请求统计。
+首次访问会创建本地控制台管理员。之后可以在控制台管理 SSO 用户、EMU 同步、Proxy 账号、登录任务、Copilot OAuth 重授权/导入、请求统计和 Error Diagnostics；管理员可在 **Settings** 修改自己的 Console 密码。
 
 ## 调用 API
 
@@ -292,4 +296,5 @@ npm run start:console
 - Copilot 内部 API 可能被 GitHub 产品组调整，生产使用可能受到兼容性影响。
 - 本项目是开源自维护方案，不提供托管 SLA；部署、密钥、账号、合规、日志和安全策略需要使用方自行负责。
 - 账号和 token 涉及敏感权限，不能提交 `.env`、SQLite 数据库、日志、Playwright trace、Copilot OAuth token 或 SSO 密码。
+- 错误诊断默认不脱敏，会保存原始入站请求、实际 Copilot 请求、Authorization/API Key、用户 prompt、工具内容和上游响应；必须像 token 数据库一样限制 `proxy-data` 和 Console 管理员访问。
 - EMU、SAML、SCIM、Copilot seat 配置依赖 GitHub Enterprise 管理权限；没有这些前提无法完整跑通批量账号和自动登录流程。

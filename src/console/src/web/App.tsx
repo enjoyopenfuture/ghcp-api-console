@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { AiCreditsUsageDto, BatchResult, ImportCopilotOauthTokenRow, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUserStatus, LoginRuntimeSettingsDto, LoginRuntimeSettingsValues, LoginTaskDto, LoginTaskStatus, ProxyAccountDto, ProxyRequestStatDto, SsoRuntimeSettingsDto, SsoRuntimeSettingsValues, SsoType, SsoUserBatchOperation, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto } from '@ghcp/shared';
+import type { AiCreditsUsageDto, BatchResult, ImportCopilotOauthTokenRow, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUserStatus, LoginRuntimeSettingsDto, LoginRuntimeSettingsValues, LoginTaskDto, LoginTaskStatus, ProxyAccountDto, ProxyErrorDiagnosticDetailDto, ProxyErrorDiagnosticsListResponse, ProxyRequestStatDto, SsoRuntimeSettingsDto, SsoRuntimeSettingsValues, SsoType, SsoUserBatchOperation, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto } from '@ghcp/shared';
 import { api, ConsoleApiError } from './api/client.js';
 import { cancelLoginTask, deleteLoginTask, getLoginRuntimeSettings, listLoginTasks, listLoginTasksPage, retryLoginTask, updateLoginRuntimeSettings } from './api/login.js';
-import { deleteProxyAccount, importCopilotOauthTokens, listProxyAccounts, listRequestStats, reauthorizeCopilotOauth } from './api/proxy.js';
+import { clearErrorDiagnostics, deleteProxyAccount, downloadErrorDiagnostic, getErrorDiagnostic, importCopilotOauthTokens, listErrorDiagnostics, listProxyAccounts, listRequestStats, reauthorizeCopilotOauth } from './api/proxy.js';
 import {
   createSsoUser,
   applyEmuImportPlan,
@@ -31,7 +31,7 @@ interface SetupState {
   initialized: boolean;
 }
 
-type Page = 'dashboard' | 'users' | 'budgets' | 'stats' | 'accounts' | 'tasks' | 'settings' | 'diagnostics';
+type Page = 'dashboard' | 'users' | 'budgets' | 'stats' | 'accounts' | 'tasks' | 'settings' | 'error-diagnostics' | 'diagnostics';
 type Notify = (message: string, tone?: 'success' | 'warning' | 'error') => void;
 const EMU_IMPORT_ROW_PAGE_SIZE = 100;
 const EMU_IMPORT_ROW_STATUSES: (ImportEmuUserStatus | '')[] = ['', 'pending_create', 'pending_update', 'created', 'updated', 'skipped', 'conflict', 'failed'];
@@ -44,7 +44,8 @@ const pages: { id: Page; label: string; description: string }[] = [
   { id: 'stats', label: 'Request Stats', description: 'Review request failures and input/output/cache token usage.' },
   { id: 'accounts', label: 'Proxy Accounts', description: 'Inspect identity mappings and refresh GitHub or Copilot tokens.' },
   { id: 'tasks', label: 'Login Tasks', description: 'Monitor automatic login and GitHub-token refresh tasks.' },
-  { id: 'settings', label: 'Settings', description: 'Update runtime SSO and Login settings without restarting services.' },
+  { id: 'settings', label: 'Settings', description: 'Change the Console password and update runtime service settings.' },
+  { id: 'error-diagnostics', label: 'Error Diagnostics', description: 'Inspect complete Copilot upstream failure snapshots.' },
   { id: 'diagnostics', label: 'Diagnostics', description: 'Check console-to-service API connectivity.' },
 ];
 
@@ -174,7 +175,8 @@ function AdminApp(props: { onLogout: () => void }) {
           {page === 'stats' ? <RequestStatsPage /> : null}
           {page === 'accounts' ? <ProxyAccountsPage notify={notify} /> : null}
           {page === 'tasks' ? <LoginTasksPage notify={notify} /> : null}
-          {page === 'settings' ? <RuntimeSettingsPage notify={notify} /> : null}
+          {page === 'settings' ? <SettingsPage notify={notify} /> : null}
+          {page === 'error-diagnostics' ? <ErrorDiagnosticsPage notify={notify} /> : null}
           {page === 'diagnostics' ? <DiagnosticsPage /> : null}
         </main>
       </div>
@@ -1018,12 +1020,89 @@ function isDeletableLoginTask(task: LoginTaskDto): boolean {
   return task.status !== 'pending' && task.status !== 'running';
 }
 
-function RuntimeSettingsPage(props: { notify: Notify }) {
+function SettingsPage(props: { notify: Notify }) {
   return (
     <div className="grid gap-4 xl:grid-cols-2">
+      <AdminPasswordCard notify={props.notify} />
       <SsoRuntimeSettingsCard notify={props.notify} />
       <LoginRuntimeSettingsCard notify={props.notify} />
     </div>
+  );
+}
+
+function AdminPasswordCard(props: { notify: Notify }) {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const save = async () => {
+    setError(undefined);
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      setError('Current password, new password, and confirmation are required.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('New password and confirmation do not match.');
+      return;
+    }
+    if (newPassword === currentPassword) {
+      setError('New password must be different from the current password.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await api('/api/console/password', {
+        method: 'PATCH',
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      props.notify('Console administrator password changed.');
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardTitle>Console administrator password</CardTitle>
+      <CardDescription>Change the password for the currently signed-in administrator. The current session remains signed in.</CardDescription>
+      {error ? <ErrorState message={error} /> : null}
+      <div className="space-y-3">
+        <Label text="Current password">
+          <Input
+            type="password"
+            autoComplete="current-password"
+            value={currentPassword}
+            onChange={(event) => setCurrentPassword(event.target.value)}
+          />
+        </Label>
+        <Label text="New password">
+          <Input
+            type="password"
+            autoComplete="new-password"
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+          />
+        </Label>
+        <Label text="Confirm new password">
+          <Input
+            type="password"
+            autoComplete="new-password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+          />
+        </Label>
+      </div>
+      <div className="mt-5 flex justify-end border-t border-slate-200 pt-4">
+        <Button onClick={() => void save()} disabled={saving}>{saving ? 'Changing...' : 'Change password'}</Button>
+      </div>
+    </Card>
   );
 }
 
@@ -1237,6 +1316,165 @@ function toLoginSettingsDraft(settings: LoginRuntimeSettingsDto): LoginRuntimeSe
     authDebugLogs: settings.authDebugLogs,
     authDebugArtifacts: settings.authDebugArtifacts,
   };
+}
+
+function ErrorDiagnosticsPage(props: { notify: Notify }) {
+  const [result, setResult] = useState<ProxyErrorDiagnosticsListResponse>();
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const [selectedId, setSelectedId] = useState<string>();
+  const [detail, setDetail] = useState<ProxyErrorDiagnosticDetailDto>();
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  const load = async (nextPage = page) => {
+    setLoading(true);
+    setError(undefined);
+    try {
+      const next = await listErrorDiagnostics({ page: nextPage, pageSize: 25 });
+      setResult(next);
+      setPage(next.page);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load(page);
+  }, [page]);
+
+  const openDetail = async (id: string) => {
+    setSelectedId(id);
+    setDetail(undefined);
+    setDetailLoading(true);
+    try {
+      setDetail(await getErrorDiagnostic(id));
+    } catch (err) {
+      props.notify((err as Error).message, 'error');
+      setSelectedId(undefined);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const download = async (id: string) => {
+    try {
+      const downloadResult = await downloadErrorDiagnostic(id);
+      const url = URL.createObjectURL(downloadResult.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = downloadResult.filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      props.notify((err as Error).message, 'error');
+    }
+  };
+
+  const clear = async () => {
+    if (!window.confirm('Clear all stored proxy error diagnostics? This cannot be undone.')) return;
+    try {
+      await clearErrorDiagnostics();
+      setSelectedId(undefined);
+      setDetail(undefined);
+      props.notify('Proxy error diagnostics cleared.');
+      await load(1);
+    } catch (err) {
+      props.notify((err as Error).message, 'error');
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <Card className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <CardTitle className="mb-0">Copilot upstream failures</CardTitle>
+            {result ? <Badge tone={result.enabled ? 'success' : 'warning'}>{result.enabled ? 'Collection enabled' : 'Collection disabled'}</Badge> : null}
+            {result ? <Badge tone={result.redacted ? 'info' : 'warning'}>{result.redacted ? 'Sensitive data redacted' : 'Unredacted records'}</Badge> : null}
+          </div>
+          <p className="mt-2 text-sm text-slate-600">Human-readable logs include headers, formatted bodies, curl commands, and the actual request sent upstream.</p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => void load(page)} disabled={loading}>Refresh</Button>
+          <Button variant="danger" onClick={() => void clear()} disabled={!result?.enabled || result.total === 0}>Clear all</Button>
+        </div>
+      </Card>
+      {loading ? <LoadingState label="Loading error diagnostics..." /> : null}
+      {error ? <ErrorState message={error} /> : null}
+      {result && !result.enabled ? <ErrorState message="Proxy error diagnostics collection is disabled by configuration." /> : null}
+      {result?.enabled ? (
+        <>
+          <Card className="overflow-x-auto p-0">
+            <Table>
+              <thead><tr><Th>Time</Th><Th>Identity</Th><Th>Route / model</Th><Th>Failure</Th><Th>Status</Th><Th>Body sizes</Th><Th>Actions</Th></tr></thead>
+              <tbody>
+                {result.items.map((item) => (
+                  <tr key={item.id}>
+                    <Td>{formatDate(item.timestamp)}</Td>
+                    <Td><span className="break-all font-mono text-xs">{item.identity}</span></Td>
+                    <Td><div>{item.path}</div><div className="text-xs text-slate-500">{item.model ?? '-'}</div></Td>
+                    <Td><Badge tone={item.failureKind === 'http' ? 'warning' : 'danger'}>{item.failureKind}</Badge></Td>
+                    <Td>{item.status ?? '-'}</Td>
+                    <Td className="whitespace-nowrap text-xs">
+                      in {formatBytes(item.inboundRequestBodyBytes)} / sent {formatBytes(item.upstreamRequestBodyBytes)} / received {formatBytes(item.upstreamResponseBodyBytes)}
+                    </Td>
+                    <Td>
+                      <div className="flex gap-2">
+                        <Button variant="secondary" onClick={() => void openDetail(item.id)}>Details</Button>
+                        <Button variant="ghost" onClick={() => void download(item.id)}>Download</Button>
+                      </div>
+                    </Td>
+                  </tr>
+                ))}
+                {result.items.length === 0 ? <EmptyRow colSpan={7} label="No Copilot upstream failures have been recorded." /> : null}
+              </tbody>
+            </Table>
+          </Card>
+          <Pagination page={result.page} total={result.total} pageSize={result.pageSize} onPage={setPage} />
+        </>
+      ) : null}
+      <Dialog
+        title="Proxy error diagnostic"
+        description={selectedId}
+        open={selectedId !== undefined}
+        onClose={() => { setSelectedId(undefined); setDetail(undefined); }}
+      >
+        {detailLoading ? <LoadingState label="Loading complete diagnostic..." /> : null}
+        {detail ? (
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Info label="Failure" value={`${detail.failureKind}${detail.status ? ` / HTTP ${detail.status}` : ''}`} />
+              <Info label="Recorded" value={formatDate(detail.timestamp)} />
+              <Info label="Identity" value={<span className="break-all font-mono text-xs">{detail.identity}</span>} />
+              <Info label="Route / model" value={`${detail.path} / ${detail.model ?? '-'}`} />
+            </div>
+            <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-all rounded-md bg-slate-950 p-3 text-xs text-slate-100">
+              {previewText(detail.content)}
+            </pre>
+            <div className="flex justify-end">
+              <Button onClick={() => void download(detail.id)}>Download complete log</Button>
+            </div>
+          </div>
+        ) : null}
+      </Dialog>
+    </div>
+  );
+}
+
+const DIAGNOSTIC_PREVIEW_CHARS = 20_000;
+
+function previewText(value: string, alreadyTruncated = false): string {
+  const truncated = alreadyTruncated || value.length > DIAGNOSTIC_PREVIEW_CHARS;
+  return `${value.slice(0, DIAGNOSTIC_PREVIEW_CHARS)}${truncated ? '\n\n[Preview truncated; download the record for complete data.]' : ''}`;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function DiagnosticsPage() {

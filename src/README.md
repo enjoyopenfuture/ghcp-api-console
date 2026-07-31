@@ -6,10 +6,10 @@
 
 | 模块 | 说明 |
 | --- | --- |
-| [`proxy`](./proxy/README.md) | 面向调用方的 Copilot API 代理；负责 API Key、identity、Copilot OAuth、请求转发和统计。 |
+| [`proxy`](./proxy/README.md) | 面向调用方的 Copilot API 代理；负责 API Key、identity、Copilot OAuth、请求转发、统计和上游失败诊断。 |
 | [`sso`](./sso/README.md) | 本地 SSO/SAML IdP、SSO 用户管理、GitHub SCIM/EMU 同步、Copilot seat 和 AI Credits 用量。 |
 | [`login`](./login/README.md) | OpenCode OAuth Device Flow + Playwright 自动登录服务；成功后把 Copilot OAuth token 回写给 proxy。 |
-| [`console`](./console/README.md) | React + Express 管理控制台；登录后统一操作 proxy/sso/login 的内部 API。 |
+| [`console`](./console/README.md) | React + Express 管理控制台；管理自身管理员密码，并统一操作 proxy/sso/login 的内部 API。 |
 | `mock-github` | 本地 GitHub SCIM mock，供开发时模拟 EMU provisioning。 |
 | `packages/shared` | 跨服务共享 DTO、API error、HTTP client、logger、ID、时间和脱敏工具。 |
 
@@ -130,6 +130,7 @@ curl http://localhost:8002/healthz
 | `SESSION_SECRET` | Cookie session 签名。Compose 复用一个值；SSO 与 Console cookie 独立，单独部署时可使用不同强密钥。 | `sso`、`console`。 |
 | `DB_PATH` | 各服务 SQLite 文件路径。 | `proxy`、`sso`、`login` 各自独立。 |
 | `LOG_LEVEL` | 结构化日志等级。 | 所有服务。 |
+| `PROXY_ERROR_DIAGNOSTICS_*` | Copilot 上游失败现场的启用、目录、脱敏和轮转策略。 | `proxy`；Console 通过管理 API 查看。 |
 
 配置来源和生效规则：
 
@@ -137,7 +138,7 @@ curl http://localhost:8002/healthz
 - 环境变量负责端口、地址、密钥、文件路径和静态行为，在进程启动时读取，修改后要重启对应服务。
 - Console **Settings** 通过内部 API 修改 `sso_runtime_settings` 和 `login_runtime_settings`，保存在各自 SQLite 中；保存后无需重启。
 - 两类配置当前没有同名 key。Settings 首次建表使用 migration 中的代码默认值，不读取旧环境变量。
-- Proxy 当前没有 runtime settings API；`REQUEST_STATS_PER_ACCOUNT_LIMIT` 是 env-only。Login task 历史当前也没有自动清理 setting 或环境变量。
+- Proxy 当前没有 runtime settings API；`REQUEST_STATS_PER_ACCOUNT_LIMIT` 和 `PROXY_ERROR_DIAGNOSTICS_*` 都是 env-only。Login task 历史当前也没有自动清理 setting 或环境变量。
 
 运行时 Settings：
 
@@ -201,6 +202,7 @@ curl http://localhost:8002/healthz
 | --- | --- |
 | `/api/accounts*` | 查询账号、验证并导入 Copilot OAuth token、发起重新授权。 |
 | `/api/request-stats` | 查看最近请求统计。 |
+| `/api/error-diagnostics*` | 分页查看、读取、下载和清空 Copilot 上游失败诊断。 |
 | `/internal/accounts/:identity/copilot-oauth-token` | `login` 成功后回写 Copilot OAuth token。 |
 | `/internal/accounts/:identity/mark-copilot-oauth-failed` | `login` 失败后标记 OAuth authorization failed。 |
 | `/internal/accounts/by-sso-user/:ssoUser` | `sso` 删除用户时清理 proxy 账号和统计。 |
@@ -279,6 +281,7 @@ Console 自身接口：
 | --- | --- | --- |
 | `ProxyAccountDto` | `proxy` | identity、SSO/GH 映射和 Copilot OAuth 状态，不包含原始 token。 |
 | `ProxyRequestStatDto` | `proxy` | 一次 LLM 请求的路径、模型、成功状态、失败原因和 token 用量。 |
+| `ProxyErrorDiagnosticRecordDto` | `proxy` | 原始入站请求、实际 Copilot 请求、上游响应或 transport/stream 错误。 |
 | `SsoUserDto` | `sso` | SSO 用户、email、role、GH login/SCIM id、EMU 状态、Copilot seat 状态。 |
 | `ImportEmuPlanDto`、`ImportEmuUserRow` | `sso` | 从 SCIM 反向导入 EMU 用户的预览计划与行结果。 |
 | `AiCreditsUsageDto` | `sso` | 企业 AI Credits 上月/本月用量、预测用量、seat 数量和成本。 |
@@ -289,7 +292,7 @@ Console 自身接口：
 
 | 服务 | 存储 | 主要内容 |
 | --- | --- | --- |
-| `proxy` | SQLite | `proxy_accounts`、`proxy_request_stats`。 |
+| `proxy` | SQLite + 轮转文本日志 | `proxy_accounts`、`proxy_request_stats`；`error-diagnostics` 保存人类可读上游失败现场。 |
 | `sso` | SQLite + 事件日志 | `sso_users`、`sso_runtime_settings`、`sso_budget_cache`、`sso_emu_import_plans`、`sso_emu_import_plan_rows`。 |
 | `login` | SQLite + 文件日志 | `login_tasks`、`login_runtime_settings` 和每账号登录日志。 |
 | `console` | JSON 文件 | `admins.json`，保存控制台管理员用户名、scrypt hash、salt、role、enabled。 |
@@ -312,6 +315,7 @@ src/
   proxy/
     src/server.ts                 # Express app、公共兼容 API、/api、/internal
     src/copilot/                  # Copilot OAuth 凭据、模型缓存和请求转发
+    src/diagnostics/              # 上游失败采集、可选脱敏和轮转文本日志
     src/db/                       # proxy_accounts、proxy_request_stats
   sso/
     src/server.ts                 # SAML 公开路由、/api 内部路由
@@ -342,6 +346,7 @@ src/
 - **新增服务间调用**：上游新增 route，下游新增 `clients/*Client.ts`；内部调用统一使用 `JsonHttpClient` 和 `X-Internal-Token`。
 - **改登录流程**：优先通过 `login` 的 `AUTH_*_SELECTOR` 和 debug 配置验证；确认是流程变化后再改 `HeadlessPlaywrightAuthStrategy.ts`。
 - **排查转发问题**：从 `console` Network 看 `/api/console/**`，再看 `[console:api-proxy]` 日志和上游服务日志。
+- **排查 Copilot 上游错误**：先用控制台日志中的 `diagnosticId` 定位，再到 Console **Error Diagnostics** 查看或下载完整失败现场。
 - **排查账号初始化**：看 `proxy` 的 token manager 日志、`sso_users`、`login_tasks`、`proxy_accounts` 四处状态是否一致。
 - **敏感信息**：不要提交 `.env`、SQLite 数据库、管理员文件、登录日志、Copilot OAuth token、SSO 密码或 trace 截图。
 
@@ -365,4 +370,4 @@ npm --workspace @ghcp/console run typecheck
 npm --workspace @ghcp/mock-github run typecheck
 ```
 
-Proxy、SSO、Login 提供 workspace 测试脚本；Console 和 mock-github 当前没有测试脚本。文档变更通常只需要检查 Markdown diff，代码变更至少运行受影响 workspace 的 typecheck/test。
+Proxy、SSO、Login 和 Console 提供 workspace 测试脚本；mock-github 当前没有测试脚本。文档变更通常只需要检查 Markdown diff，代码变更至少运行受影响 workspace 的 typecheck/test。

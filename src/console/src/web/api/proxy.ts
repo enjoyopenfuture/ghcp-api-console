@@ -1,5 +1,16 @@
-import type { BatchResult, DeleteProxyAccountResult, ImportCopilotOauthTokenRow, PageResponse, ProxyAccountDto, ProxyRequestStatDto, SsoType } from '@ghcp/shared';
-import { api } from './client.js';
+import type {
+  BatchResult,
+  ClearProxyErrorDiagnosticsResponse,
+  DeleteProxyAccountResult,
+  ImportCopilotOauthTokenRow,
+  PageResponse,
+  ProxyAccountDto,
+  ProxyErrorDiagnosticDetailDto,
+  ProxyErrorDiagnosticsListResponse,
+  ProxyRequestStatDto,
+  SsoType,
+} from '@ghcp/shared';
+import { api, downloadApi } from './client.js';
 
 export interface ListProxyAccountsQuery {
   q?: string;
@@ -54,6 +65,28 @@ export function importCopilotOauthTokens(csvText: string): Promise<BatchResult<I
   return api<BatchResult<ImportCopilotOauthTokenRow>>('/api/console/proxy/accounts/copilot-oauth-token/import', {
     method: 'POST',
     body: JSON.stringify({ csvText }),
+  });
+}
+
+export function listErrorDiagnostics(params: { page?: number; pageSize?: number } = {}): Promise<ProxyErrorDiagnosticsListResponse> {
+  const search = new URLSearchParams();
+  if (params.page) search.set('page', String(params.page));
+  if (params.pageSize) search.set('pageSize', String(params.pageSize));
+  return api<ProxyErrorDiagnosticsListResponse>(`/api/console/proxy/error-diagnostics${query(search)}`);
+}
+
+export function getErrorDiagnostic(id: string): Promise<ProxyErrorDiagnosticDetailDto> {
+  return api<ProxyErrorDiagnosticDetailDto>(`/api/console/proxy/error-diagnostics/${encodeURIComponent(id)}`);
+}
+
+export function downloadErrorDiagnostic(id: string): Promise<{ blob: Blob; filename: string }> {
+  return downloadApi(`/api/console/proxy/error-diagnostics/${encodeURIComponent(id)}/download`);
+}
+
+export function clearErrorDiagnostics(): Promise<ClearProxyErrorDiagnosticsResponse> {
+  return api<ClearProxyErrorDiagnosticsResponse>('/api/console/proxy/error-diagnostics', {
+    method: 'DELETE',
+    body: JSON.stringify({ confirm: true }),
   });
 }
 

@@ -17,6 +17,7 @@ const requestLogger = new Logger('request');
 export function buildApp(): express.Express {
   const app = express();
   app.use(logRequestHeaders);
+  app.use(captureRawRequestBody);
   app.use(express.json({ limit: '20mb' }));
   app.get('/healthz', (_req, res) => {
     res.json({ status: 'ok', service: 'proxy' });
@@ -40,6 +41,20 @@ export function buildApp(): express.Express {
     res.status(404).json({ error: { message, type: 'invalid_request_error' } });
   });
   return app;
+}
+
+export function captureRawRequestBody(req: Request, _res: Response, next: NextFunction): void {
+  const chunks: Buffer[] = [];
+  let byteLength = 0;
+  req.on('data', (chunk: Buffer | Uint8Array | string) => {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    chunks.push(Buffer.from(buffer));
+    byteLength += buffer.byteLength;
+  });
+  req.on('end', () => {
+    req.rawBody = Buffer.concat(chunks, byteLength);
+  });
+  next();
 }
 
 function logRequestHeaders(req: Request, _res: Response, next: NextFunction): void {

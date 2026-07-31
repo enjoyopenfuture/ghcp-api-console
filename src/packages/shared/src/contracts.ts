@@ -56,6 +56,93 @@ export interface ProxyRequestStatDto {
   cacheWriteTokens?: number;
 }
 
+export type ProxyErrorDiagnosticFailureKind = 'http' | 'fetch' | 'stream';
+
+export interface HttpHeaderPair {
+  name: string;
+  value: string;
+}
+
+export interface ProxyErrorDiagnosticBodyDto {
+  encoding: 'base64' | 'utf8' | 'unavailable';
+  data?: string;
+  byteLength: number;
+  capturedByteLength: number;
+  truncated: boolean;
+  complete: boolean;
+  unavailableReason?: string;
+}
+
+export interface ProxyErrorDiagnosticRequestDto {
+  method: string;
+  url: string;
+  headers: HttpHeaderPair[];
+  body?: ProxyErrorDiagnosticBodyDto;
+}
+
+export interface ProxyErrorDiagnosticResponseDto {
+  status: number;
+  statusText: string;
+  headers: HttpHeaderPair[];
+  body?: ProxyErrorDiagnosticBodyDto;
+}
+
+export interface ProxyErrorDiagnosticThrownErrorDto {
+  name: string;
+  message: string;
+  stack?: string;
+  cause?: string;
+}
+
+export interface ProxyErrorDiagnosticRecordDto {
+  id: string;
+  timestamp: string;
+  failureKind: ProxyErrorDiagnosticFailureKind;
+  identity: string;
+  path: ProxyRequestStatDto['path'];
+  model?: string;
+  redacted: boolean;
+  inboundRequest: ProxyErrorDiagnosticRequestDto;
+  upstreamRequest: ProxyErrorDiagnosticRequestDto;
+  upstreamResponse?: ProxyErrorDiagnosticResponseDto;
+  error?: ProxyErrorDiagnosticThrownErrorDto;
+}
+
+export interface ProxyErrorDiagnosticSummaryDto {
+  id: string;
+  timestamp: string;
+  failureKind: ProxyErrorDiagnosticFailureKind;
+  identity: string;
+  path: ProxyRequestStatDto['path'];
+  model?: string;
+  status?: number;
+  redacted: boolean;
+  inboundRequestBodyBytes: number;
+  upstreamRequestBodyBytes: number;
+  upstreamResponseBodyBytes: number;
+}
+
+export interface ProxyErrorDiagnosticDetailDto extends ProxyErrorDiagnosticSummaryDto {
+  content: string;
+}
+
+export interface ProxyErrorDiagnosticsListResponse {
+  enabled: boolean;
+  redacted: boolean;
+  items: ProxyErrorDiagnosticSummaryDto[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface ClearProxyErrorDiagnosticsRequest {
+  confirm: true;
+}
+
+export interface ClearProxyErrorDiagnosticsResponse {
+  cleared: true;
+}
+
 export interface SsoUserDto {
   ssoUser: string;
   email: string;

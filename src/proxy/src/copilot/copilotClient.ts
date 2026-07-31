@@ -1,5 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
+import {
+  DiagnosticBodyCapture,
+  recordFetchFailure,
+  recordHttpFailure,
+  recordStreamFailure,
+  type CapturedResponseBody,
+  type ErrorDiagnosticContext,
+  type PreparedUpstreamRequest,
+} from '../diagnostics/errorDiagnostics.js';
 import { Logger } from '../logger.js';
 import type { CopilotAuthContext } from './copilotAuth.js';
 
@@ -36,6 +45,11 @@ export interface ForwardCopilotRequestOptions {
 
 export interface ListModelsOptions {
   useCache?: boolean;
+  diagnostics?: ErrorDiagnosticContext;
+}
+
+export interface PreparedCopilotRequest extends PreparedUpstreamRequest {
+  readonly method: 'GET' | 'POST';
 }
 
 export class CopilotApiError extends Error {
@@ -68,14 +82,24 @@ export async function listModels(copilot: CopilotAuthContext, options: ListModel
   const snapshot = await getModelsSnapshot(copilot, {
     forceRefresh: !useCache,
     allowStaleOnError: useCache,
+    diagnostics: options.diagnostics,
   });
   return snapshot.models;
 }
 
-async function fetchModels(copilot: CopilotAuthContext): Promise<ModelInfo[]> {
-  const res = await fetch(copilotUrl(copilot, '/models'), { headers: modelHeaders(copilot) });
-  if (!res.ok) throw new CopilotApiError(`List models failed with HTTP ${res.status}.`, res.status);
-  const data = (await res.json()) as { data?: ModelInfo[] };
+async function fetchModels(copilot: CopilotAuthContext, diagnostics?: ErrorDiagnosticContext): Promise<ModelInfo[]> {
+  const request: PreparedCopilotRequest = Object.freeze({
+    url: copilotUrl(copilot, '/models'),
+    method: 'GET',
+    headers: Object.freeze(modelHeaders(copilot)),
+  });
+  const res = await executeWithDiagnostics(request, diagnostics);
+  const body = await readWithDiagnostics(request, res, diagnostics);
+  if (!res.ok) {
+    if (diagnostics) await recordHttpFailure(diagnostics, request, res, body.capture);
+    throw new CopilotApiError(`List models failed with HTTP ${res.status}.`, res.status);
+  }
+  const data = JSON.parse(body.buffer.toString('utf8')) as { data?: ModelInfo[] };
   if (!Array.isArray(data.data)) throw new CopilotApiError('List models returned an invalid response.', 502);
   return data.data;
 }
@@ -94,10 +118,28 @@ export async function forwardCopilotRequest(
   body: Record<string, unknown>,
   options: ForwardCopilotRequestOptions = {},
 ): Promise<Response> {
-  return fetch(copilotUrl(copilot, path), {
+  return executePreparedCopilotRequest(prepareCopilotRequest(copilot, path, body, options));
+}
+
+export function prepareCopilotRequest(
+  copilot: CopilotAuthContext,
+  path: CopilotApiPath,
+  body: Record<string, unknown>,
+  options: ForwardCopilotRequestOptions = {},
+): PreparedCopilotRequest {
+  return Object.freeze({
+    url: copilotUrl(copilot, path),
     method: 'POST',
-    headers: copilotHeaders(copilot, body.stream === true, options),
+    headers: Object.freeze(copilotHeaders(copilot, body.stream === true, options)),
     body: JSON.stringify(body),
+  });
+}
+
+export function executePreparedCopilotRequest(request: PreparedCopilotRequest): Promise<Response> {
+  return fetch(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
   });
 }
 
@@ -105,14 +147,15 @@ export async function assertModelSupportsPath(
   copilot: CopilotAuthContext,
   path: CopilotApiPath,
   model: string,
+  diagnostics?: ErrorDiagnosticContext,
 ): Promise<void> {
   const capabilityPath = modelCapabilityPath(path);
-  let snapshot = await getModelsSnapshot(copilot);
+  let snapshot = await getModelsSnapshot(copilot, { diagnostics });
   let supportedPaths = snapshot.pathMap.get(model);
   if (supportedPaths?.includes(capabilityPath)) return;
 
   if (Date.now() - snapshot.fetchedAt > MODELS_CACHE_NEGATIVE_RECHECK_MS) {
-    snapshot = await getModelsSnapshot(copilot, { forceRefresh: true, allowStaleOnError: false });
+    snapshot = await getModelsSnapshot(copilot, { forceRefresh: true, allowStaleOnError: false, diagnostics });
     supportedPaths = snapshot.pathMap.get(model);
     if (supportedPaths?.includes(capabilityPath)) return;
   }
@@ -126,7 +169,7 @@ export function modelSupportsPath(model: ModelInfo, path: CopilotApiPath): boole
 
 async function getModelsSnapshot(
   copilot: CopilotAuthContext,
-  options: { forceRefresh?: boolean; allowStaleOnError?: boolean } = {},
+  options: { forceRefresh?: boolean; allowStaleOnError?: boolean; diagnostics?: ErrorDiagnosticContext } = {},
 ): Promise<ModelsSnapshot> {
   const cacheKey = modelsCacheKey(copilot);
   const entry = modelsCacheEntry(cacheKey);
@@ -135,7 +178,7 @@ async function getModelsSnapshot(
   if (!options.forceRefresh && snapshot && snapshot.expiresAt > now) return snapshot;
 
   try {
-    return await refreshModelsSnapshot(cacheKey, copilot, entry);
+    return await refreshModelsSnapshot(cacheKey, copilot, entry, options.diagnostics);
   } catch (err) {
     if (err instanceof CopilotApiError && (err.status === 401 || err.status === 403)) throw err;
     if (options.allowStaleOnError !== false && snapshot && now - snapshot.fetchedAt <= MODELS_CACHE_STALE_MAX_AGE_MS) {
@@ -162,10 +205,11 @@ function refreshModelsSnapshot(
   cacheKey: ModelsCacheKey,
   copilot: CopilotAuthContext,
   entry: ModelsCacheEntry,
+  diagnostics?: ErrorDiagnosticContext,
 ): Promise<ModelsSnapshot> {
   if (entry.refreshPromise) return entry.refreshPromise;
 
-  const promise = fetchModels(copilot)
+  const promise = fetchModels(copilot, diagnostics)
     .then((models) => {
       const now = Date.now();
       const snapshot: ModelsSnapshot = {
@@ -212,6 +256,53 @@ function modelsCacheKey(copilot: CopilotAuthContext): ModelsCacheKey {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+async function executeWithDiagnostics(
+  request: PreparedCopilotRequest,
+  diagnostics: ErrorDiagnosticContext | undefined,
+): Promise<Response> {
+  try {
+    return await executePreparedCopilotRequest(request);
+  } catch (err) {
+    if (diagnostics) await recordFetchFailure(diagnostics, request, err);
+    throw err;
+  }
+}
+
+async function readWithDiagnostics(
+  request: PreparedCopilotRequest,
+  response: Response,
+  diagnostics: ErrorDiagnosticContext | undefined,
+): Promise<{ buffer: Buffer; capture: CapturedResponseBody }> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return {
+      buffer: Buffer.alloc(0),
+      capture: { buffer: Buffer.alloc(0), byteLength: 0, complete: true, truncated: false },
+    };
+  }
+  const capture = new DiagnosticBodyCapture();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      chunks.push(chunk);
+      totalBytes += chunk.byteLength;
+      capture.add(value);
+    }
+  } catch (err) {
+    const partial = capture.result(false);
+    if (diagnostics) await recordStreamFailure(diagnostics, request, response, partial, err);
+    throw err;
+  }
+  return {
+    buffer: Buffer.concat(chunks, totalBytes),
+    capture: capture.result(true),
+  };
 }
 
 function copilotHeaders(
