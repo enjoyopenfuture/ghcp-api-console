@@ -38,6 +38,7 @@ Console 解决“运维/开发人员如何集中管理各服务状态和手动�
 | Request Stats | `RequestStatsPage` | 查看 proxy 请求统计，按 identity/GH login、model、成功状态过滤。 |
 | Proxy Accounts | `ProxyAccountsPage` | 查看 identity 映射和 Copilot OAuth 状态、详情、验证后导入 token、发起重新授权、批量删除选中 Proxy account 及其 request stats。 |
 | Login Tasks | `LoginTasksPage` | 查询/分页/筛选登录任务，取消、重试失败任务、删除终态任务。 |
+| Settings | `RuntimeSettingsPage` | 在线读取/更新 SSO 与 Login runtime settings，显示持久化版本和更新时间。 |
 | Diagnostics | `DiagnosticsPage` | 调用 proxy/sso/login-service 代理路由检查服务连通性和内部 token 是否匹配。 |
 
 ### 与 proxy/sso/login 的交互
@@ -122,6 +123,31 @@ Console 使用 `dotenv/config` 读取当前进程工作目录下的 `.env`，建
 
 根目录 `.env.example` 中也出现了 `SESSION_SECRET`、`INTERNAL_API_TOKEN` 等共享变量；Console 代码实际只直接读取上表变量。
 
+### Console 环境变量与 Settings 页
+
+Console 自身没有 runtime settings 表。上表环境变量只在 Console 启动时读取，修改后需要重启；它们不会被 Settings 页面覆盖。Settings 页面只是经过 Console 的认证代理调用：
+
+- `GET/PATCH /api/console/sso/settings/runtime` → SSO 的 `/api/settings/runtime`
+- `GET/PATCH /api/console/login-service/settings/runtime` → Login 的 `/api/settings/runtime`
+
+SSO settings 保存在 `sso.sqlite`：用户上限、用户名 fallback、默认 email 域、`sync_emu` 并发以及 SCIM delay/retry。Login settings 保存在 `login.sqlite`：Login 并发、认证超时、debug 日志和 debug artifacts。保存请求带 `expectedVersion`；发生 409 时页面重新加载最新值，避免覆盖另一管理员的修改。
+
+| 服务 | Setting | 默认值 | Console 校验范围 |
+| --- | --- | ---: | --- |
+| SSO | `maxSsoUsers` | `null`（不限） | 空值或整数 `1..1000000` |
+| SSO | `userPrefix` | `user` | 规范化后必须含字母或数字，最长 32 字符 |
+| SSO | `emailDomain` | `customsso.com` | 合法域名 |
+| SSO | `bulkSyncConcurrency` | `3` | 整数 `1..20` |
+| SSO | `scimRequestDelayMs` | `250` | 整数 `0..60000` |
+| SSO | `scimMaxRetries` | `3` | 整数 `0..10` |
+| SSO | `scimRetryBaseDelayMs` | `1000` | 整数 `0..60000` |
+| Login | `concurrency` | `1` | 整数 `1..20` |
+| Login | `authTimeoutMs` | `60000` | 整数 `5000..600000` |
+| Login | `authDebugLogs` | `false` | boolean |
+| Login | `authDebugArtifacts` | `false` | boolean |
+
+Proxy 当前没有可由 Console 修改的 runtime settings。`REQUEST_STATS_PER_ACCOUNT_LIMIT` 只能通过 Proxy 环境变量配置并重启生效；Login task 历史也没有自动 retention setting，只能在 Login Tasks 页面逐条删除终态任务。密钥、服务 URL、文件路径、证书和 token 均不应进入 Settings。
+
 ## 5. 接口与 API 边界
 
 ### Console 服务端接口
@@ -164,6 +190,9 @@ Console 使用 `dotenv/config` 读取当前进程工作目录下的 `.env`，建
 | 函数 | Console 路径 | 核心结构 |
 | --- | --- | --- |
 | `listSsoUsers({ q,page,pageSize,sort,dir })` | `GET /api/console/sso/users` | `PageResponse<SsoUserDto>` |
+| `getSsoUserCapacity()` | `GET /api/console/sso/users/capacity` | `SsoUserCapacityDto` |
+| `getSsoRuntimeSettings()` | `GET /api/console/sso/settings/runtime` | `SsoRuntimeSettingsDto` |
+| `updateSsoRuntimeSettings({ expectedVersion, changes })` | `PATCH /api/console/sso/settings/runtime` | `SsoRuntimeSettingsDto` |
 | `createSsoUser({ ssoUser,password?,email?,role? })` | `POST /api/console/sso/users` | `SsoUserDto` |
 | `patchSsoUser(ssoUser, { password?,email?,role? })` | `PATCH /api/console/sso/users/:ssoUser` | `SsoUserDto` |
 | `importSsoUsers(csvText)` | `POST /api/console/sso/users/import` | `BatchResult<{ line, ssoUser, status, detail }>` |
@@ -181,6 +210,8 @@ Console 使用 `dotenv/config` 读取当前进程工作目录下的 `.env`，建
 | 函数 | Console 路径 | 核心结构 |
 | --- | --- | --- |
 | `listLoginTasks(limit)` | `GET /api/console/login-service/tasks?limit=...` | `LoginTaskDto[]` |
+| `getLoginRuntimeSettings()` | `GET /api/console/login-service/settings/runtime` | `LoginRuntimeSettingsDto` |
+| `updateLoginRuntimeSettings({ expectedVersion, changes })` | `PATCH /api/console/login-service/settings/runtime` | `LoginRuntimeSettingsDto` |
 | `listLoginTasksPage({ q,status,page,pageSize })` | `GET /api/console/login-service/tasks?...` | `PageResponse<LoginTaskDto>` |
 | `cancelLoginTask(id)` | `POST /api/console/login-service/tasks/:id/cancel` | `LoginTaskDto` |
 | `deleteLoginTask(id)` | `DELETE /api/console/login-service/tasks/:id` | `void` |
@@ -229,6 +260,7 @@ interface ConsoleSession {
 - `ProxyRequestStatDto`：请求时间、identity、path、model、成功/失败原因、input/output/cache token 统计。
 - `SsoUserDto`：`ssoUser`、email、role、可选 `ghLogin/ghScimId`、EMU 状态、Copilot seat 状态与错误。
 - `LoginTaskDto`：任务 id、identity、ssoUser、可选 ghLogin、`ssoType`、状态、尝试次数、失败原因、时间戳。
+- `SsoRuntimeSettingsDto` / `LoginRuntimeSettingsDto`：运行时设置值、乐观锁 `version` 和 `updatedAt`。
 - `AiCreditsUsageDto`：企业名、上月/本月用量、当前月预测、seat 数量与成本。
 - `ImportEmuPlanDto` / `ImportEmuUserRow`：GH/SCIM 导入预览、应用结果、行级状态与摘要。
 - `ImportCopilotOauthTokenRow`、`SsoUserBatchRow`：批处理行结果。

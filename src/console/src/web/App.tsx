@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { AiCreditsUsageDto, BatchResult, ImportCopilotOauthTokenRow, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUserStatus, LoginTaskDto, LoginTaskStatus, ProxyAccountDto, ProxyRequestStatDto, SsoType, SsoUserBatchOperation, SsoUserBatchRow, SsoUserDto } from '@ghcp/shared';
-import { api } from './api/client.js';
-import { cancelLoginTask, deleteLoginTask, listLoginTasks, listLoginTasksPage, retryLoginTask } from './api/login.js';
+import type { AiCreditsUsageDto, BatchResult, ImportCopilotOauthTokenRow, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUserStatus, LoginRuntimeSettingsDto, LoginRuntimeSettingsValues, LoginTaskDto, LoginTaskStatus, ProxyAccountDto, ProxyRequestStatDto, SsoRuntimeSettingsDto, SsoRuntimeSettingsValues, SsoType, SsoUserBatchOperation, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto } from '@ghcp/shared';
+import { api, ConsoleApiError } from './api/client.js';
+import { cancelLoginTask, deleteLoginTask, getLoginRuntimeSettings, listLoginTasks, listLoginTasksPage, retryLoginTask, updateLoginRuntimeSettings } from './api/login.js';
 import { deleteProxyAccount, importCopilotOauthTokens, listProxyAccounts, listRequestStats, reauthorizeCopilotOauth } from './api/proxy.js';
 import {
   createSsoUser,
@@ -9,12 +9,15 @@ import {
   createEmuImportPlan,
   deleteEmuImportPlan,
   importSsoUsers,
+  getSsoUserCapacity,
+  getSsoRuntimeSettings,
   listEmuImportPlanRows,
   listSsoUsers,
   patchSsoUser,
   readAiCreditsUsage,
   refreshAiCreditsUsage,
   runSsoUserBatch,
+  updateSsoRuntimeSettings,
 } from './api/sso.js';
 import { Badge } from './components/ui/badge.js';
 import { Button } from './components/ui/button.js';
@@ -28,7 +31,7 @@ interface SetupState {
   initialized: boolean;
 }
 
-type Page = 'dashboard' | 'users' | 'budgets' | 'stats' | 'accounts' | 'tasks' | 'diagnostics';
+type Page = 'dashboard' | 'users' | 'budgets' | 'stats' | 'accounts' | 'tasks' | 'settings' | 'diagnostics';
 type Notify = (message: string, tone?: 'success' | 'warning' | 'error') => void;
 const EMU_IMPORT_ROW_PAGE_SIZE = 100;
 const EMU_IMPORT_ROW_STATUSES: (ImportEmuUserStatus | '')[] = ['', 'pending_create', 'pending_update', 'created', 'updated', 'skipped', 'conflict', 'failed'];
@@ -41,6 +44,7 @@ const pages: { id: Page; label: string; description: string }[] = [
   { id: 'stats', label: 'Request Stats', description: 'Review request failures and input/output/cache token usage.' },
   { id: 'accounts', label: 'Proxy Accounts', description: 'Inspect identity mappings and refresh GitHub or Copilot tokens.' },
   { id: 'tasks', label: 'Login Tasks', description: 'Monitor automatic login and GitHub-token refresh tasks.' },
+  { id: 'settings', label: 'Settings', description: 'Update runtime SSO and Login settings without restarting services.' },
   { id: 'diagnostics', label: 'Diagnostics', description: 'Check console-to-service API connectivity.' },
 ];
 
@@ -170,6 +174,7 @@ function AdminApp(props: { onLogout: () => void }) {
           {page === 'stats' ? <RequestStatsPage /> : null}
           {page === 'accounts' ? <ProxyAccountsPage notify={notify} /> : null}
           {page === 'tasks' ? <LoginTasksPage notify={notify} /> : null}
+          {page === 'settings' ? <RuntimeSettingsPage notify={notify} /> : null}
           {page === 'diagnostics' ? <DiagnosticsPage /> : null}
         </main>
       </div>
@@ -265,16 +270,21 @@ function UsersPage(props: { notify: Notify }) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkAction, setBulkAction] = useState<string>();
   const [batchResult, setBatchResult] = useState<UserBatchActionResult>();
+  const [capacity, setCapacity] = useState<SsoUserCapacityDto>();
   const allCurrentPageSelected = users.length > 0 && users.every((user) => selected.has(user.ssoUser));
 
   const load = async (nextPage = page) => {
     setLoading(true);
     setError(undefined);
     try {
-      const result = await listSsoUsers({ q, page: nextPage, pageSize: 25, sort: 'ssoUser', dir: 'asc' });
+      const [result, nextCapacity] = await Promise.all([
+        listSsoUsers({ q, page: nextPage, pageSize: 25, sort: 'ssoUser', dir: 'asc' }),
+        getSsoUserCapacity(),
+      ]);
       setUsers(result.items);
       setTotal(result.total);
       setPage(result.page);
+      setCapacity(nextCapacity);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -339,15 +349,22 @@ function UsersPage(props: { notify: Notify }) {
     <div className="space-y-4">
       <Card>
         <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex flex-1 gap-2">
-            <Input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search SSO user, email, or GH login" className="max-w-md flex-1" />
-            <Button variant="secondary" onClick={() => { clearSelection(); void load(1); }}>Search</Button>
+          <div className="flex flex-1 flex-col gap-2">
+            <div className="flex gap-2">
+              <Input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search SSO user, email, or GH login" className="max-w-md flex-1" />
+              <Button variant="secondary" onClick={() => { clearSelection(); void load(1); }}>Search</Button>
+            </div>
+            {capacity ? (
+              <p className={capacity.reached ? 'text-sm font-medium text-red-700' : 'text-sm text-slate-600'}>
+                SSO user capacity: {capacity.current}{capacity.limit === null ? ' (unlimited)' : ` / ${capacity.limit} (${capacity.remaining} remaining)`}
+              </p>
+            ) : null}
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" onClick={() => setBatchOpen(true)}>Batch create</Button>
+            <Button variant="secondary" onClick={() => setBatchOpen(true)} disabled={!capacity || capacity.reached}>Batch create</Button>
             <Button variant="secondary" onClick={() => setImportOpen(true)}>Import CSV</Button>
             <Button variant="secondary" onClick={() => setEmuImportOpen(true)}>Import from GH</Button>
-            <Button onClick={() => setCreateOpen(true)}>Create user</Button>
+            <Button onClick={() => setCreateOpen(true)} disabled={!capacity || capacity.reached}>Create user</Button>
           </div>
         </div>
       </Card>
@@ -405,7 +422,7 @@ function UsersPage(props: { notify: Notify }) {
       <CreateUserDialog open={createOpen} onClose={() => setCreateOpen(false)} onDone={async () => { setCreateOpen(false); await load(1); props.notify('SSO user created.'); }} />
       <ImportUsersDialog open={importOpen} onClose={() => setImportOpen(false)} onDone={async () => { await load(1); props.notify('Import completed.'); }} />
       <ImportEmuUsersDialog open={emuImportOpen} onClose={() => setEmuImportOpen(false)} onDone={async () => { await load(1); props.notify('GH import completed.'); }} />
-      <BatchCreateDialog open={batchOpen} onClose={() => setBatchOpen(false)} onDone={async () => { setBatchOpen(false); await load(1); props.notify('Batch create completed.'); }} />
+      <BatchCreateDialog open={batchOpen} remaining={capacity?.remaining ?? null} onClose={() => setBatchOpen(false)} onDone={async () => { setBatchOpen(false); await load(1); props.notify('Batch create completed.'); }} />
       <EditUserDialog user={editing} onClose={() => setEditing(undefined)} onDone={async () => { setEditing(undefined); await load(); props.notify('SSO user updated.'); }} />
       <UserBatchActionResultDialog result={batchResult} onClose={() => setBatchResult(undefined)} />
     </div>
@@ -1001,6 +1018,227 @@ function isDeletableLoginTask(task: LoginTaskDto): boolean {
   return task.status !== 'pending' && task.status !== 'running';
 }
 
+function RuntimeSettingsPage(props: { notify: Notify }) {
+  return (
+    <div className="grid gap-4 xl:grid-cols-2">
+      <SsoRuntimeSettingsCard notify={props.notify} />
+      <LoginRuntimeSettingsCard notify={props.notify} />
+    </div>
+  );
+}
+
+interface SsoSettingsDraft {
+  maxSsoUsers: string;
+  userPrefix: string;
+  emailDomain: string;
+  bulkSyncConcurrency: string;
+  scimRequestDelayMs: string;
+  scimMaxRetries: string;
+  scimRetryBaseDelayMs: string;
+}
+
+function SsoRuntimeSettingsCard(props: { notify: Notify }) {
+  const [settings, setSettings] = useState<SsoRuntimeSettingsDto>();
+  const [draft, setDraft] = useState<SsoSettingsDraft>();
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const load = async () => {
+    setLoading(true);
+    setError(undefined);
+    try {
+      const next = await getSsoRuntimeSettings();
+      setSettings(next);
+      setDraft(toSsoSettingsDraft(next));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const save = async () => {
+    if (!settings || !draft) return;
+    setSaving(true);
+    setError(undefined);
+    try {
+      const changes: SsoRuntimeSettingsValues = {
+        maxSsoUsers: draft.maxSsoUsers.trim() ? Number(draft.maxSsoUsers) : null,
+        userPrefix: draft.userPrefix,
+        emailDomain: draft.emailDomain,
+        bulkSyncConcurrency: Number(draft.bulkSyncConcurrency),
+        scimRequestDelayMs: Number(draft.scimRequestDelayMs),
+        scimMaxRetries: Number(draft.scimMaxRetries),
+        scimRetryBaseDelayMs: Number(draft.scimRetryBaseDelayMs),
+      };
+      const next = await updateSsoRuntimeSettings({ expectedVersion: settings.version, changes });
+      setSettings(next);
+      setDraft(toSsoSettingsDraft(next));
+      props.notify('SSO settings saved and applied.');
+    } catch (err) {
+      if (err instanceof ConsoleApiError && err.status === 409) {
+        await load();
+        setError('SSO settings changed in another session. The latest values were reloaded.');
+      } else {
+        setError((err as Error).message);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardTitle>SSO runtime settings</CardTitle>
+      <CardDescription>Saved in sso.sqlite. Changes apply to new users, SCIM operations, and new sync batches without restarting SSO.</CardDescription>
+      {loading ? <LoadingState label="Loading SSO settings..." /> : null}
+      {error ? <ErrorState message={error} /> : null}
+      {settings && draft ? (
+        <>
+          <FormGrid>
+            <Label text="Maximum SSO users">
+              <Input value={draft.maxSsoUsers} placeholder="Unlimited" type="number" min={1} max={1_000_000} onChange={(event) => setDraft({ ...draft, maxSsoUsers: event.target.value })} />
+            </Label>
+            <Label text="Fallback user prefix">
+              <Input value={draft.userPrefix} onChange={(event) => setDraft({ ...draft, userPrefix: event.target.value })} />
+            </Label>
+            <Label text="Default email domain">
+              <Input value={draft.emailDomain} onChange={(event) => setDraft({ ...draft, emailDomain: event.target.value })} />
+            </Label>
+            <Label text="Sync EMU concurrency">
+              <Input value={draft.bulkSyncConcurrency} type="number" min={1} max={20} onChange={(event) => setDraft({ ...draft, bulkSyncConcurrency: event.target.value })} />
+            </Label>
+            <Label text="SCIM request delay (ms)">
+              <Input value={draft.scimRequestDelayMs} type="number" min={0} max={60_000} onChange={(event) => setDraft({ ...draft, scimRequestDelayMs: event.target.value })} />
+            </Label>
+            <Label text="SCIM max retries">
+              <Input value={draft.scimMaxRetries} type="number" min={0} max={10} onChange={(event) => setDraft({ ...draft, scimMaxRetries: event.target.value })} />
+            </Label>
+            <Label text="SCIM retry base delay (ms)">
+              <Input value={draft.scimRetryBaseDelayMs} type="number" min={0} max={60_000} onChange={(event) => setDraft({ ...draft, scimRetryBaseDelayMs: event.target.value })} />
+            </Label>
+          </FormGrid>
+          <SettingsFooter settings={settings} saving={saving} onSave={save} />
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
+function LoginRuntimeSettingsCard(props: { notify: Notify }) {
+  const [settings, setSettings] = useState<LoginRuntimeSettingsDto>();
+  const [draft, setDraft] = useState<LoginRuntimeSettingsValues>();
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const load = async () => {
+    setLoading(true);
+    setError(undefined);
+    try {
+      const next = await getLoginRuntimeSettings();
+      setSettings(next);
+      setDraft(toLoginSettingsDraft(next));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  const save = async () => {
+    if (!settings || !draft) return;
+    setSaving(true);
+    setError(undefined);
+    try {
+      const next = await updateLoginRuntimeSettings({ expectedVersion: settings.version, changes: draft });
+      setSettings(next);
+      setDraft(toLoginSettingsDraft(next));
+      props.notify('Login settings saved and applied.');
+    } catch (err) {
+      if (err instanceof ConsoleApiError && err.status === 409) {
+        await load();
+        setError('Login settings changed in another session. The latest values were reloaded.');
+      } else {
+        setError((err as Error).message);
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardTitle>Login runtime settings</CardTitle>
+      <CardDescription>Saved in login.sqlite. Changes apply to queued work and newly started Playwright tasks; running tasks keep their starting snapshot.</CardDescription>
+      {loading ? <LoadingState label="Loading Login settings..." /> : null}
+      {error ? <ErrorState message={error} /> : null}
+      {settings && draft ? (
+        <>
+          <FormGrid>
+            <Label text="Login concurrency">
+              <Input value={draft.concurrency} type="number" min={1} max={20} onChange={(event) => setDraft({ ...draft, concurrency: Number(event.target.value) })} />
+            </Label>
+            <Label text="Authentication timeout (ms)">
+              <Input value={draft.authTimeoutMs} type="number" min={5_000} max={600_000} onChange={(event) => setDraft({ ...draft, authTimeoutMs: Number(event.target.value) })} />
+            </Label>
+          </FormGrid>
+          <div className="mt-4 space-y-2">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={draft.authDebugLogs} onChange={(event) => setDraft({ ...draft, authDebugLogs: event.target.checked })} />
+              Enable account debug logs for new tasks
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={draft.authDebugArtifacts} onChange={(event) => setDraft({ ...draft, authDebugArtifacts: event.target.checked })} />
+              Save debug artifacts for new tasks
+            </label>
+          </div>
+          <SettingsFooter settings={settings} saving={saving} onSave={save} />
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
+function SettingsFooter(props: { settings: { version: number; updatedAt: string }; saving: boolean; onSave: () => void }) {
+  return (
+    <div className="mt-5 flex flex-col gap-3 border-t border-slate-200 pt-4 sm:flex-row sm:items-center sm:justify-between">
+      <p className="text-xs text-slate-500">Version {props.settings.version} - updated {formatDate(props.settings.updatedAt)}</p>
+      <Button onClick={props.onSave} disabled={props.saving}>{props.saving ? 'Saving...' : 'Save and apply'}</Button>
+    </div>
+  );
+}
+
+function toSsoSettingsDraft(settings: SsoRuntimeSettingsDto): SsoSettingsDraft {
+  return {
+    maxSsoUsers: settings.maxSsoUsers === null ? '' : String(settings.maxSsoUsers),
+    userPrefix: settings.userPrefix,
+    emailDomain: settings.emailDomain,
+    bulkSyncConcurrency: String(settings.bulkSyncConcurrency),
+    scimRequestDelayMs: String(settings.scimRequestDelayMs),
+    scimMaxRetries: String(settings.scimMaxRetries),
+    scimRetryBaseDelayMs: String(settings.scimRetryBaseDelayMs),
+  };
+}
+
+function toLoginSettingsDraft(settings: LoginRuntimeSettingsDto): LoginRuntimeSettingsValues {
+  return {
+    concurrency: settings.concurrency,
+    authTimeoutMs: settings.authTimeoutMs,
+    authDebugLogs: settings.authDebugLogs,
+    authDebugArtifacts: settings.authDebugArtifacts,
+  };
+}
+
 function DiagnosticsPage() {
   const [results, setResults] = useState<{ name: string; ok: boolean; message: string }[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1329,7 +1567,6 @@ function EmuImportResult(props: {
             #{row.rowIndex ?? '-'} {row.ssoUser || '-'} - {row.status} - {row.detail}
             {row.ghLogin ? ` GH login: ${row.ghLogin}` : ''}
             {row.copilotSeatStatus ? ` Copilot seat: ${row.copilotSeatStatus}` : ''}
-            {row.passwordForLogin ? ` Login password: ${row.passwordForLogin}` : ''}
           </li>
         ))}
         {props.rows.length === 0 ? <li className="text-slate-500">No rows match this filter.</li> : null}
@@ -1339,7 +1576,7 @@ function EmuImportResult(props: {
   );
 }
 
-function BatchCreateDialog(props: { open: boolean; onClose: () => void; onDone: () => Promise<void> }) {
+function BatchCreateDialog(props: { open: boolean; remaining: number | null; onClose: () => void; onDone: () => Promise<void> }) {
   const [prefix, setPrefix] = useState('user');
   const [start, setStart] = useState(1);
   const [count, setCount] = useState(5);
@@ -1350,6 +1587,10 @@ function BatchCreateDialog(props: { open: boolean; onClose: () => void; onDone: 
   const preview = Array.from({ length: Math.max(0, Math.min(count, 20)) }, (_, index) => `${prefix}${start + index}`);
 
   const submit = async () => {
+    if (props.remaining !== null && count > props.remaining) {
+      setError(`Only ${props.remaining} SSO user slot(s) remain.`);
+      return;
+    }
     setSaving(true);
     setError(undefined);
     try {
@@ -1373,7 +1614,7 @@ function BatchCreateDialog(props: { open: boolean; onClose: () => void; onDone: 
       <FormGrid>
         <Label text="Prefix"><Input value={prefix} onChange={(event) => setPrefix(event.target.value)} /></Label>
         <Label text="Start index"><Input type="number" value={start} onChange={(event) => setStart(Number(event.target.value))} /></Label>
-        <Label text="Count"><Input type="number" min={1} max={500} value={count} onChange={(event) => setCount(Number(event.target.value))} /></Label>
+        <Label text="Count"><Input type="number" min={1} max={props.remaining === null ? 500 : Math.min(500, props.remaining)} value={count} onChange={(event) => setCount(Number(event.target.value))} /></Label>
         <Label text="Role"><RoleSelect value={role} onChange={setRole} /></Label>
       </FormGrid>
       <label className="mt-3 flex items-center gap-2 text-sm">
@@ -1383,6 +1624,7 @@ function BatchCreateDialog(props: { open: boolean; onClose: () => void; onDone: 
       <div className="mt-4 rounded-md bg-slate-50 p-3 text-sm text-slate-700">
         <p className="font-medium">Preview</p>
         <p className="mt-1">{preview.join(', ')}{count > preview.length ? ` ... +${count - preview.length} more` : ''}</p>
+        {props.remaining !== null ? <p className="mt-2">{props.remaining} SSO user slot(s) remaining.</p> : null}
       </div>
       <DialogActions error={error} saving={saving} onCancel={props.onClose} onSubmit={submit} submitLabel="Create users" />
     </Dialog>

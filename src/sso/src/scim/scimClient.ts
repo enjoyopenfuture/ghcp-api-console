@@ -1,5 +1,6 @@
 import { errorFields, loggerFor } from '@ghcp/shared';
 import { config } from '../config.js';
+import { getSsoRuntimeSettings } from '../db/runtimeSettingsRepo.js';
 import type { SsoUserRecord } from '../db/usersRepo.js';
 import { normalizeHandle } from './handle.js';
 
@@ -136,9 +137,10 @@ async function deleteByScimId(scimId: string): Promise<boolean> {
 }
 
 async function scimFetch(path: string, init: RequestInit, operation: string): Promise<Response> {
+  const settings = getSsoRuntimeSettings();
   let lastError: Error | undefined;
-  for (let attempt = 0; attempt <= config.scimMaxRetries; attempt += 1) {
-    await waitForScimSlot();
+  for (let attempt = 0; attempt <= settings.scimMaxRetries; attempt += 1) {
+    await waitForScimSlot(settings.scimRequestDelayMs);
     const startedAt = Date.now();
     try {
       logger.debug('request', 'Sending SCIM request', { operation, method: init.method ?? 'GET', path, attempt });
@@ -150,14 +152,14 @@ async function scimFetch(path: string, init: RequestInit, operation: string): Pr
         return res;
       }
       const body = await res.text();
-      if (attempt === config.scimMaxRetries) throw new Error(`${operation} failed after retries: ${res.status} ${body}`);
+      if (attempt === settings.scimMaxRetries) throw new Error(`${operation} failed after retries: ${res.status} ${body}`);
       logger.warn('retry', 'SCIM request will retry after retryable response', { ...fields, responseBody: body });
-      await sleep(backoffMs(attempt, res));
+      await sleep(backoffMs(attempt, settings.scimRetryBaseDelayMs, res));
     } catch (err) {
       lastError = err as Error;
-      if (attempt === config.scimMaxRetries) break;
+      if (attempt === settings.scimMaxRetries) break;
       logger.warn('retry-error', 'SCIM request failed and will retry', { operation, path, attempt, durationMs: Date.now() - startedAt, ...errorFields(err) });
-      await sleep(backoffMs(attempt));
+      await sleep(backoffMs(attempt, settings.scimRetryBaseDelayMs));
     }
   }
   logger.error('failed', 'SCIM request failed after retries', { operation, path, ...errorFields(lastError) });
@@ -166,10 +168,10 @@ async function scimFetch(path: string, init: RequestInit, operation: string): Pr
 
 let nextScimRequestAt = 0;
 
-async function waitForScimSlot(): Promise<void> {
+async function waitForScimSlot(requestDelayMs: number): Promise<void> {
   const now = Date.now();
   const waitMs = Math.max(0, nextScimRequestAt - now);
-  nextScimRequestAt = Math.max(now, nextScimRequestAt) + config.scimRequestDelayMs;
+  nextScimRequestAt = Math.max(now, nextScimRequestAt) + requestDelayMs;
   if (waitMs > 0) await sleep(waitMs);
 }
 
@@ -223,8 +225,8 @@ function retryAfterMs(res: Response): number | undefined {
   return Number.isFinite(dateMs) ? Math.max(0, dateMs - Date.now()) : undefined;
 }
 
-function backoffMs(attempt: number, res?: Response): number {
-  return retryAfterMs(res ?? new Response()) ?? Math.min(30_000, config.scimRetryBaseDelayMs * 2 ** attempt);
+function backoffMs(attempt: number, retryBaseDelayMs: number, res?: Response): number {
+  return retryAfterMs(res ?? new Response()) ?? Math.min(30_000, retryBaseDelayMs * 2 ** attempt);
 }
 
 function sleep(ms: number): Promise<void> {

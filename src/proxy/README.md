@@ -26,7 +26,7 @@ Proxy 位于客户端与 GitHub Copilot 后端之间，负责：
 | 请求统计 | `src/db/requestStatsRepo.ts` | 记录路径、模型、成功/失败、失败原因、输入/输出/cache token；按账号保留最近 N 条。 |
 | Claude Code 优化 | `src/routes/claudeCodeMode.ts`、`src/routes/claudeCodeCompat.ts`、`src/routes/anthropicModelProfiles.ts` | 可选开启，对 `/v1/messages*` 做 Anthropic/Claude Code 兼容处理、模型规范化和 profile 驱动的 thinking/effort 修正；支持请求头覆盖默认模式。 |
 
-当前提供基于 Node test runner 的认证/迁移测试和 `start:prod` 脚本；Dockerfile 未声明 `EXPOSE`/`HEALTHCHECK`。
+当前提供基于 Node test runner 的认证/迁移/路由测试和 `start:prod` 脚本；Dockerfile 未声明 `EXPOSE`/`HEALTHCHECK`。
 
 ## 3. 启动方式
 
@@ -58,7 +58,7 @@ npm --workspace @ghcp/proxy run build
 (cd src/proxy && node dist/index.js)
 ```
 
-当前 package scripts 只提供 `start`、`build`、`typecheck`，没有单独的构建后运行脚本。构建后直接运行时建议在 `src/proxy` 目录执行，以便 `dotenv` 读取本模块 `.env`；也可以显式注入环境变量。
+Package scripts 提供 `start`、`start:prod`、`build`、`typecheck` 和 `test`。构建后直接运行时建议在 `src/proxy` 目录执行，以便 `dotenv` 读取本模块 `.env`；也可以使用 `start:prod` 或显式注入环境变量。
 
 ### 3.3 Docker
 
@@ -83,18 +83,24 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 | `API_KEY` | 空字符串 / `change-me` | 是 | 公共代理接口的本地 API Key；为空时公共接口无法通过鉴权。 |
 | `IDENTITY_HEADER` | `X-User-Identity` / 同 | 否 | 公共请求中用于绑定 proxy 账号的请求头名。 |
 | `IDENTITY_HEADER_REQUIRED` | `true` / `true` | 否 | 为 `false` 时缺失身份头会使用 `default`。 |
-| `CLAUDE_CODE_OPTIMIZED` | `false` / `false` | 否 | Claude Code 兼容优化和 `/v1/messages/count_tokens` 的默认模式；单个请求可用 `X-Claude-Code-Optimized: true|false` 覆盖。 |
+| `CLAUDE_CODE_OPTIMIZED` | `false` / `true` | 否 | Claude Code 兼容优化和 `/v1/messages/count_tokens` 的默认模式；单个请求可用 `X-Claude-Code-Optimized: true|false` 覆盖。 |
 | `INTERNAL_API_TOKEN` | 空字符串 / `change-me` | 是 | `/api`、`/internal` 鉴权；同时用于 Proxy 调用 SSO/Login 服务。 |
 | `SSO_BASE_URL` | `http://localhost:7001` / 同 | 否 | SSO 服务地址；用于确保用户、读取 SSO 用户、同步 EMU。 |
 | `LOGIN_BASE_URL` | `http://localhost:7003` / 同 | 否 | Login 服务地址；用于创建 Copilot OAuth 重新授权任务。 |
 | `ENTERPRISE_SHORTCODE` | `octo` / `octo` | 否 | 初始化身份时从规范化 identity 末尾剥离 `_<shortcode>`，生成 SSO 用户名。 |
 | `REQUEST_STATS_PER_ACCOUNT_LIMIT` | `100` / `100` | 否 | 每个 identity 保留的请求统计条数；必须为正整数。 |
 | `COPILOT_API_BASE_URL` | `https://api.githubcopilot.com` / 同 | 否 | GitHub.com Copilot API base URL。 |
-| `OPENCODE_VERSION` | `1.0.0` / 同 | 否 | 生成 `User-Agent: opencode/<version>`。 |
-| `OPENCODE_USER_AGENT` | 当前未配置 / 同 | 否 | 显式覆盖完整 User-Agent；非空时优先。 |
+| `OPENCODE_VERSION` | `1.0.0` / `1.18.4` | 否 | 生成 `User-Agent: opencode/<version>`。 |
+| `OPENCODE_USER_AGENT` | 未设置 / 未设置 | 否 | 显式覆盖完整 User-Agent；非空时优先于 `OPENCODE_VERSION`。 |
 | `GITHUB_API_VERSION` | `2026-06-01` / 同 | 否 | `X-GitHub-Api-Version` 请求头。 |
 
-根 `.env.example` 中的 `PROXY_API_KEY` 当前未被 `src/proxy/src/config.ts` 读取；Proxy 代码读取的是 `API_KEY`。根示例里的 `SESSION_SECRET`、`SCIM_TOKEN`、`MOCK_GITHUB_BASE_URL`、`ENTERPRISE_SLUG`、`GITHUB_COPILOT_SEAT_PAT`、`SP_*`、`SSO_EMAIL_DOMAIN`、`GITHUB_BUDGET_*` 也不是 Proxy 当前配置项。
+### `.env` 与 runtime Settings
+
+Proxy 当前没有 runtime settings 表、Settings 页面字段或 `/api/settings/runtime` 接口；上表全部是启动期环境变量，修改后需要重启 Proxy。密钥、服务地址和数据库路径不会写入 SQLite。
+
+`REQUEST_STATS_PER_ACCOUNT_LIMIT` 是 env-only 的数据保留策略：每次写入统计后清理当前 identity 的旧记录，服务启动时还会对所有 identity 清理一次。代码默认值和 `src/proxy/.env.example` 都是 `100`；根 `.env.example` 当前显式设置为 `2`，因此直接复制根模板启动 Compose 时实际保留 2 条。该值必须是正整数。
+
+根 `.env` 还包含其他服务的变量，但 Proxy 只读取上表项目。Docker Compose 只会把 `docker-compose.yml` 中 Proxy `environment` 明确列出的变量传入容器。
 
 ## 5. 接口与 API 边界
 
@@ -290,4 +296,4 @@ src/proxy/
 - 排查数据：优先查看管理接口 `/api/accounts`、`/api/request-stats`；不要在响应中暴露数据库内的原始 Token。
 - 扩展新 Copilot 路径时，至少同步更新 `COPILOT_FORWARD_PATHS`、`compatible.ts` 路由、模型路径推断、`ProxyRequestStatDto.path`、SQLite 统计语义和本文档。
 - 新增配置时，同时更新 `config.ts`、`src/proxy/.env.example` 和本 README；若配置影响其他服务，也要检查 shared contracts 或调用客户端。
-- 本模块当前未提供测试脚本；改代码后至少运行 `npm --workspace @ghcp/proxy run typecheck`，涉及 shared 类型时也运行 `npm --workspace @ghcp/shared run typecheck`。
+- 本模块提供 `test` 脚本；改代码后运行 `npm --workspace @ghcp/proxy run test` 和 `npm --workspace @ghcp/proxy run typecheck`，涉及 shared 类型时也运行 shared typecheck。

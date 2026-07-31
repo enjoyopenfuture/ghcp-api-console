@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import type { Browser, BrowserContext, Locator, Page } from 'playwright';
 import { chromium } from 'playwright-extra';
 import stealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { config, type AuthConfig } from '../config.js';
+import type { RuntimeAuthConfig } from '../config.js';
 import type { AccountLogger } from '../tasks/accountLogger.js';
 import type { AccountCredentials, AuthStrategy } from './types.js';
 import type { DeviceCodeResponse } from './deviceFlow.js';
@@ -31,7 +31,7 @@ export class HeadlessPlaywrightAuthStrategy implements AuthStrategy {
   readonly name = 'headless-playwright';
 
   constructor(
-    private readonly options: AuthConfig,
+    private readonly options: RuntimeAuthConfig,
     private readonly account: AccountCredentials,
     private readonly logger: AccountLogger,
   ) {}

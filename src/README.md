@@ -127,15 +127,39 @@ curl http://localhost:8002/healthz
 | `SSO_BASE_URL` | 指向 `sso` 根地址，不带 `/api`。 | `console`、`proxy`。 |
 | `LOGIN_BASE_URL` | 指向 `login` 根地址，不带 `/api`。 | `console`、`proxy`。 |
 | `SCIM_TOKEN` | GitHub/Mock SCIM Bearer token。 | `sso` 与 `mock-github` 或真实 GitHub SCIM。 |
-| `SESSION_SECRET` | Cookie session 签名。 | `sso`、`console`。 |
+| `SESSION_SECRET` | Cookie session 签名。Compose 复用一个值；SSO 与 Console cookie 独立，单独部署时可使用不同强密钥。 | `sso`、`console`。 |
 | `DB_PATH` | 各服务 SQLite 文件路径。 | `proxy`、`sso`、`login` 各自独立。 |
 | `LOG_LEVEL` | 结构化日志等级。 | 所有服务。 |
+
+配置来源和生效规则：
+
+- 根 `.env` 服务于 Docker Compose 插值；服务目录 `.env` 服务于单独运行 workspace。只有 Compose 文件显式传递的变量才会进入容器。
+- 环境变量负责端口、地址、密钥、文件路径和静态行为，在进程启动时读取，修改后要重启对应服务。
+- Console **Settings** 通过内部 API 修改 `sso_runtime_settings` 和 `login_runtime_settings`，保存在各自 SQLite 中；保存后无需重启。
+- 两类配置当前没有同名 key。Settings 首次建表使用 migration 中的代码默认值，不读取旧环境变量。
+- Proxy 当前没有 runtime settings API；`REQUEST_STATS_PER_ACCOUNT_LIMIT` 是 env-only。Login task 历史当前也没有自动清理 setting 或环境变量。
+
+运行时 Settings：
+
+| 服务 | Setting | 默认值 | 范围/语义 |
+| --- | --- | ---: | --- |
+| SSO | `maxSsoUsers` | `null` | `null` 或 `1..1000000`；限制 SSO 用户总数。 |
+| SSO | `userPrefix` | `user` | 用户名 fallback，规范化后最长 32 字符。 |
+| SSO | `emailDomain` | `customsso.com` | 新用户默认 email 域名。 |
+| SSO | `bulkSyncConcurrency` | `3` | `1..20`；只控制 `sync_emu` 批处理。 |
+| SSO | `scimRequestDelayMs` | `250` | `0..60000`；SCIM 请求最小间隔。 |
+| SSO | `scimMaxRetries` | `3` | `0..10`；SCIM 最大重试次数。 |
+| SSO | `scimRetryBaseDelayMs` | `1000` | `0..60000`；SCIM 退避基础延迟。 |
+| Login | `concurrency` | `1` | `1..20`；当前进程并发任务数。 |
+| Login | `authTimeoutMs` | `60000` | `5000..600000`；新任务认证超时。 |
+| Login | `authDebugLogs` | `false` | 新任务是否写详细账号日志。 |
+| Login | `authDebugArtifacts` | `false` | 新任务是否保存调试产物。 |
 
 其他重要配置：
 
 - `sso` 的 SAML 需要 `BASE_URL`、`SP_ENTITY_ID`、`SP_ACS_URL`、`CERT_DIR`，证书目录中必须有 `idp-cert.pem` 和 `idp-key.pem`。
 - `sso` 的 GitHub SCIM/Copilot 功能需要 `ENTERPRISE_SLUG`、`SCIM_BASE_URL`/`MOCK_GITHUB_BASE_URL`、`SCIM_TOKEN`、`GITHUB_COPILOT_SEAT_PAT`。
-- `login` 的 Playwright 流程可通过 `AUTH_*_SELECTOR` 覆盖页面选择器，通过 `AUTH_HEADLESS`、`AUTH_DEBUG_LOGS`、`AUTH_DEBUG_ARTIFACTS` 调试。
+- `login` 的 Playwright 流程可通过 `AUTH_*_SELECTOR` 覆盖页面选择器，通过 `AUTH_HEADLESS` 和 Console 中的运行时 debug 设置调试。
 - `console` 的管理员文件由 `ADMINS_FILE` 指定，默认 `./data/admins.json`。
 
 ## 5. 功能边界与 API 约定
@@ -199,6 +223,7 @@ curl http://localhost:8002/healthz
 | 路径 | 说明 |
 | --- | --- |
 | `/api/users/ensure` | 根据 identity 确保 SSO 用户存在，供 proxy 初始化账号。 |
+| `/api/settings/runtime` | 读取/更新 SSO runtime settings；更新使用 `expectedVersion` 乐观锁。 |
 | `/api/users`、`/api/users/:ssoUser` | 用户查询、创建、修改。 |
 | `/api/users/import` | CSV 导入 SSO 用户。 |
 | `/api/users/batch` | 批量 `sync_emu`、`suspend_emu`、`delete_emu`、`delete_sso`、`assign_copilot`、`remove_copilot`。 |
@@ -219,6 +244,7 @@ curl http://localhost:8002/healthz
 | `POST` | `/api/tasks/:id/cancel` | 取消 pending/running 任务。 |
 | `POST` | `/api/tasks/:id/retry` | 复用原任务信息并重新提供密码后重试。 |
 | `DELETE` | `/api/tasks/:id` | 删除 success/failed/cancelled 任务。 |
+| `GET/PATCH` | `/api/settings/runtime` | 读取/更新 Login runtime settings；更新使用 `expectedVersion` 乐观锁。 |
 
 边界：`login` 没有面向终端用户的 UI，也不维护最终账号状态；成功/失败结果都回写给 `proxy`。
 
@@ -264,8 +290,8 @@ Console 自身接口：
 | 服务 | 存储 | 主要内容 |
 | --- | --- | --- |
 | `proxy` | SQLite | `proxy_accounts`、`proxy_request_stats`。 |
-| `sso` | SQLite + 事件日志 | `sso_users`、`sso_budget_cache`、`sso_emu_import_plans`、`sso_emu_import_plan_rows`。 |
-| `login` | SQLite + 文件日志 | `login_tasks` 和每账号登录日志。 |
+| `sso` | SQLite + 事件日志 | `sso_users`、`sso_runtime_settings`、`sso_budget_cache`、`sso_emu_import_plans`、`sso_emu_import_plan_rows`。 |
+| `login` | SQLite + 文件日志 | `login_tasks`、`login_runtime_settings` 和每账号登录日志。 |
 | `console` | JSON 文件 | `admins.json`，保存控制台管理员用户名、scrypt hash、salt、role、enabled。 |
 | `mock-github` | 内存 Map | 模拟 SCIM user resource。 |
 
@@ -293,8 +319,8 @@ src/
     src/saml/                     # SAML metadata、AuthnRequest、SAMLResponse
     src/db/                       # 用户、预算、导入计划、事件日志
   login/
-    src/server.ts                 # /api/tasks
-    src/tasks/                    # 内存队列、runner、账号日志
+    src/server.ts                 # /api/tasks、/api/settings/runtime
+    src/tasks/                    # 内存队列、runtime concurrency、runner、账号日志
     src/auth/                     # device flow、Playwright 登录策略
   console/
     src/server/                   # 控制台登录、静态资源、API proxy
@@ -339,4 +365,4 @@ npm --workspace @ghcp/console run typecheck
 npm --workspace @ghcp/mock-github run typecheck
 ```
 
-当前各服务没有统一测试脚本；文档变更通常只需要检查 Markdown diff，代码变更至少运行受影响 workspace 的 typecheck。
+Proxy、SSO、Login 提供 workspace 测试脚本；Console 和 mock-github 当前没有测试脚本。文档变更通常只需要检查 Markdown diff，代码变更至少运行受影响 workspace 的 typecheck/test。

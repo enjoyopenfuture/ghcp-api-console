@@ -5,7 +5,6 @@ export interface LoginConfig {
   dbPath: string;
   internalApiToken: string;
   proxyBaseUrl: string;
-  concurrency: number;
   logDir: string;
   githubOauthClientId: string;
   githubOauthScope: string;
@@ -24,11 +23,14 @@ export interface AuthConfig {
   ssoProvider: SsoProvider;
   azureStaySignedIn: boolean;
   headless: boolean;
+  debugArtifactsDir: string;
+  selectors: Record<string, string | undefined>;
+}
+
+export interface RuntimeAuthConfig extends AuthConfig {
   timeoutMs: number;
   debugLogs: boolean;
   debugArtifacts: boolean;
-  debugArtifactsDir: string;
-  selectors: Record<string, string | undefined>;
 }
 
 export const config: LoginConfig = {
@@ -36,7 +38,6 @@ export const config: LoginConfig = {
   dbPath: process.env.DB_PATH ?? './data/login.sqlite',
   internalApiToken: process.env.INTERNAL_API_TOKEN ?? '',
   proxyBaseUrl: process.env.PROXY_BASE_URL ?? 'http://localhost:3000',
-  concurrency: readPositiveInteger(process.env.LOGIN_CONCURRENCY, 1),
   logDir: process.env.LOG_DIR ?? './logs/login',
   githubOauthClientId: readOptionalString(process.env.GITHUB_OAUTH_CLIENT_ID) ?? 'Ov23li8tweQw6odWQebz',
   githubOauthScope: readOptionalString(process.env.GITHUB_OAUTH_SCOPE) ?? 'read:user',
@@ -51,9 +52,6 @@ export const config: LoginConfig = {
     ssoProvider: readSsoProvider(process.env.SSO_PROVIDER),
     azureStaySignedIn: readBoolean(process.env.AZURE_STAY_SIGNED_IN, false),
     headless: readBoolean(process.env.AUTH_HEADLESS, true),
-    timeoutMs: readPositiveInteger(process.env.AUTH_TIMEOUT_MS, 60_000),
-    debugLogs: readBoolean(process.env.AUTH_DEBUG_LOGS, false),
-    debugArtifacts: readBoolean(process.env.AUTH_DEBUG_ARTIFACTS, false),
     debugArtifactsDir: process.env.AUTH_DEBUG_ARTIFACT_DIR ?? '.auth-debug',
     selectors: {
       deviceCodeInput: process.env.AUTH_DEVICE_CODE_INPUT_SELECTOR,
@@ -78,12 +76,6 @@ export const config: LoginConfig = {
 function readPort(value: string | undefined, defaultValue: number): number {
   const parsed = Number(value ?? defaultValue);
   if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) throw new Error(`Invalid PORT "${value}".`);
-  return parsed;
-}
-
-function readPositiveInteger(value: string | undefined, defaultValue: number): number {
-  const parsed = Number(value ?? defaultValue);
-  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`Invalid positive integer "${value}".`);
   return parsed;
 }
 

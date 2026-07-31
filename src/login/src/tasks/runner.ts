@@ -1,6 +1,7 @@
 import type { CreateLoginTaskRequest } from '@ghcp/shared';
 import { loggerFor } from '@ghcp/shared';
-import { config } from '../config.js';
+import { config, type RuntimeAuthConfig } from '../config.js';
+import { loginRuntimeSettings } from '../db/runtimeSettingsRepo.js';
 import { HeadlessPlaywrightAuthStrategy } from '../auth/HeadlessPlaywrightAuthStrategy.js';
 import { loginWithDeviceFlow } from '../auth/deviceFlow.js';
 import { saveCopilotOauthToken } from '../clients/proxyClient.js';
@@ -14,16 +15,20 @@ export interface RuntimeTaskPayload extends CreateLoginTaskRequest {
 }
 
 export async function runLoginTask(task: LoginTaskRecord, payload: RuntimeTaskPayload): Promise<void> {
-  const logger = AccountLogger.create(config.logDir, payload.ssoUser, config.auth.debugLogs);
+  const runtimeSettings = loginRuntimeSettings.getSnapshot();
+  const logger = AccountLogger.create(config.logDir, payload.ssoUser, runtimeSettings.authDebugLogs);
   markRunning(task.id, logger.path);
   stdoutLogger.info('running', 'Login task marked running', { taskId: task.id, identity: payload.identity, ssoUser: payload.ssoUser, ghLogin: payload.ghLogin, logPath: logger.path });
   try {
     if (!payload.ssoPassword) throw new Error('ssoPassword is required to run a login task.');
     if (!payload.ghLogin.trim()) throw new Error('ghLogin is required to run a login task.');
-    const authConfig = {
+    const authConfig: RuntimeAuthConfig = {
       ...config.auth,
       ssoUrl: payload.ssoUrl ?? config.auth.ssoUrl,
       ssoProvider: payload.ssoType === 'azure' ? 'azure' as const : 'custom' as const,
+      timeoutMs: runtimeSettings.authTimeoutMs,
+      debugLogs: runtimeSettings.authDebugLogs,
+      debugArtifacts: runtimeSettings.authDebugArtifacts,
       selectors: { ...config.auth.selectors, ...payload.selectorOverrides },
     };
     const copilotOauthToken = await loginWithDeviceFlow(

@@ -82,6 +82,50 @@ export interface EnsureSsoUserResponse {
   created: boolean;
 }
 
+export interface SsoUserCapacityDto {
+  current: number;
+  limit: number | null;
+  remaining: number | null;
+  reached: boolean;
+}
+
+export interface SsoRuntimeSettingsValues {
+  maxSsoUsers: number | null;
+  userPrefix: string;
+  emailDomain: string;
+  bulkSyncConcurrency: number;
+  scimRequestDelayMs: number;
+  scimMaxRetries: number;
+  scimRetryBaseDelayMs: number;
+}
+
+export interface SsoRuntimeSettingsDto extends SsoRuntimeSettingsValues {
+  version: number;
+  updatedAt: string;
+}
+
+export interface UpdateSsoRuntimeSettingsRequest {
+  expectedVersion: number;
+  changes: Partial<SsoRuntimeSettingsValues>;
+}
+
+export interface LoginRuntimeSettingsValues {
+  concurrency: number;
+  authTimeoutMs: number;
+  authDebugLogs: boolean;
+  authDebugArtifacts: boolean;
+}
+
+export interface LoginRuntimeSettingsDto extends LoginRuntimeSettingsValues {
+  version: number;
+  updatedAt: string;
+}
+
+export interface UpdateLoginRuntimeSettingsRequest {
+  expectedVersion: number;
+  changes: Partial<LoginRuntimeSettingsValues>;
+}
+
 export type SsoUserBatchOperation = 'sync_emu' | 'suspend_emu' | 'delete_emu' | 'delete_sso' | 'assign_copilot' | 'remove_copilot';
 export type SsoUserBatchRowStatus = 'success' | 'failed';
 
@@ -121,7 +165,6 @@ export interface ImportEmuUserRow {
   copilotSeatStatus?: 'assigned' | 'unassigned';
   status: ImportEmuUserStatus;
   detail: string;
-  passwordForLogin?: string;
 }
 
 export interface ImportEmuPlanSummary {

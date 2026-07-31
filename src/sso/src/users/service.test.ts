@@ -6,8 +6,6 @@ test('continues deleting an SSO user when the GitHub user has no Copilot seat', 
   process.env.SSO_USER_EVENTS_LOG = '/dev/null';
   process.env.SCIM_BASE_URL = 'https://scim.test/scim/v2/enterprises/test';
   process.env.SCIM_TOKEN = 'test-scim-token';
-  process.env.SCIM_REQUEST_DELAY_MS = '0';
-  process.env.SCIM_MAX_RETRIES = '0';
   process.env.PROXY_BASE_URL = 'https://proxy.test';
   process.env.INTERNAL_API_TOKEN = 'test-internal-token';
   process.env.GITHUB_API_BASE_URL = 'https://github.test';
@@ -40,7 +38,9 @@ test('continues deleting an SSO user when the GitHub user has no Copilot seat', 
 
   try {
     const { createUser, getUser, updateEmu } = await import('../db/usersRepo.js');
+    const { updateSsoRuntimeSettings } = await import('../db/runtimeSettingsRepo.js');
     const { runSsoUserBatch } = await import('./service.js');
+    updateSsoRuntimeSettings({ expectedVersion: 1, changes: { scimRequestDelayMs: 0, scimMaxRetries: 0 } });
     createUser({
       ssoUser: 'alice',
       passwordHash: 'hash',

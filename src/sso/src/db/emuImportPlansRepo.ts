@@ -29,7 +29,6 @@ interface RowRecord {
   copilot_seat_status?: ImportEmuUserRow['copilotSeatStatus'];
   status: ImportEmuUserStatus;
   detail: string;
-  password_for_login?: string;
   action?: EmuImportAction;
 }
 
@@ -42,8 +41,8 @@ export function createEmuImportPlanRecord(input: { id: string; ssoUser?: string;
     const insertRow = getDb().prepare(`
       INSERT INTO sso_emu_import_plan_rows (
         plan_id, row_index, sso_user, email, gh_login, gh_scim_id, emu_status, copilot_seat_status,
-        status, detail, password_for_login, action, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        status, detail, action, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     input.rows.forEach((row, index) => {
       insertRow.run(
@@ -57,7 +56,6 @@ export function createEmuImportPlanRecord(input: { id: string; ssoUser?: string;
         row.copilotSeatStatus,
         row.status,
         row.detail,
-        row.passwordForLogin,
         row.action,
         now,
         now,
@@ -103,7 +101,7 @@ export function updateEmuImportPlanRow(planId: string, row: EmuImportPlanRowReco
     .prepare(`
       UPDATE sso_emu_import_plan_rows
       SET email = ?, gh_login = ?, gh_scim_id = ?, emu_status = ?, copilot_seat_status = ?,
-          status = ?, detail = ?, password_for_login = ?, action = ?, updated_at = ?
+          status = ?, detail = ?, action = ?, updated_at = ?
       WHERE plan_id = ? AND row_index = ?
     `)
     .run(
@@ -114,7 +112,6 @@ export function updateEmuImportPlanRow(planId: string, row: EmuImportPlanRowReco
       row.copilotSeatStatus,
       row.status,
       row.detail,
-      row.passwordForLogin,
       row.action,
       nowIso(),
       planId,
@@ -182,7 +179,6 @@ function toImportRow(row: RowRecord): ImportEmuUserRow {
     copilotSeatStatus: row.copilot_seat_status,
     status: row.status,
     detail: row.detail,
-    passwordForLogin: row.password_for_login,
   };
 }
 

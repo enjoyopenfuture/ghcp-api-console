@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { apiError, errorFields, loggerFor } from '@ghcp/shared';
-import { getUser, listUsers, toDto } from '../db/usersRepo.js';
+import { getUser, listUsers, SsoUserLimitReachedError, toDto } from '../db/usersRepo.js';
 import type { ScimEnterpriseRole } from '../scim/scimClient.js';
 import type { ImportEmuUserStatus, SsoUserBatchOperation } from '@ghcp/shared';
 import {
@@ -11,6 +11,7 @@ import {
   deleteEmuImportPlan,
   ensureUser,
   getEmuImportPlan,
+  getSsoUserCapacity,
   importEmuUsers,
   importUsers,
   listEmuImportPlanRows,
@@ -31,7 +32,11 @@ usersApiRouter.post('/users/ensure', (req, res) => {
     res.status(400).json(apiError('invalid_identity', 'identity is required.'));
     return;
   }
-  res.json(ensureUser(identity, typeof preferredSsoUser === 'string' ? preferredSsoUser : undefined));
+  try {
+    res.json(ensureUser(identity, typeof preferredSsoUser === 'string' ? preferredSsoUser : undefined));
+  } catch (err) {
+    sendCreateUserError(res, err, 'ensure_user_failed');
+  }
 });
 
 usersApiRouter.get('/users', (req, res) => {
@@ -46,12 +51,15 @@ usersApiRouter.get('/users', (req, res) => {
   );
 });
 
+usersApiRouter.get('/users/capacity', (_req, res) => {
+  res.json(getSsoUserCapacity());
+});
+
 usersApiRouter.post('/users', (req, res) => {
   try {
     res.status(201).json(createSsoUser(req.body as { ssoUser: string; password?: string; email?: string; role?: 'user' | 'admin' }));
   } catch (err) {
-    logger.error('create-user-failed', 'Create SSO user failed', { ...errorFields(err) });
-    res.status(400).json(apiError('create_user_failed', (err as Error).message));
+    sendCreateUserError(res, err, 'create_user_failed');
   }
 });
 
@@ -201,4 +209,16 @@ function numberQuery(value: unknown): number | undefined {
   if (!raw) return undefined;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function sendCreateUserError(res: import('express').Response, err: unknown, fallbackCode: string): void {
+  logger.error(fallbackCode, 'Create SSO user failed', { ...errorFields(err) });
+  if (err instanceof SsoUserLimitReachedError) {
+    res.status(409).json(apiError('sso_user_limit_reached', err.message, {
+      current: err.current,
+      limit: err.limit,
+    }));
+    return;
+  }
+  res.status(400).json(apiError(fallbackCode, err instanceof Error ? err.message : String(err)));
 }

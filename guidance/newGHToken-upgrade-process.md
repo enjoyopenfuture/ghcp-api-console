@@ -639,11 +639,7 @@ SQLite WAL 能处理部分并发写入，但业务语义不安全：
 
 #### 推荐做法
 
-优先保留单个 Login 节点，谨慎提高环境变量的值：
-
-```text
-LOGIN_CONCURRENCY
-```
+优先保留单个 Login 节点，通过 Console Settings 页面谨慎提高 Login concurrency。
 
 建议从 `2` 开始，根据以下指标逐步调整：
 

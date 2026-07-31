@@ -19,6 +19,19 @@ export function runMigrations(db: Database.Database): void {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS sso_runtime_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      max_sso_users INTEGER,
+      user_prefix TEXT NOT NULL,
+      email_domain TEXT NOT NULL,
+      bulk_sync_concurrency INTEGER NOT NULL,
+      scim_request_delay_ms INTEGER NOT NULL,
+      scim_max_retries INTEGER NOT NULL,
+      scim_retry_base_delay_ms INTEGER NOT NULL,
+      version INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS sso_budget_cache (
       period_key TEXT PRIMARY KEY,
       year INTEGER NOT NULL,
@@ -49,7 +62,6 @@ export function runMigrations(db: Database.Database): void {
       copilot_seat_status TEXT,
       status TEXT NOT NULL,
       detail TEXT NOT NULL,
-      password_for_login TEXT,
       action TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -60,11 +72,27 @@ export function runMigrations(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_sso_emu_import_plan_rows_status
       ON sso_emu_import_plan_rows (plan_id, status, row_index);
   `);
+  db.prepare(`
+    INSERT OR IGNORE INTO sso_runtime_settings (
+      id, max_sso_users, user_prefix, email_domain, bulk_sync_concurrency,
+      scim_request_delay_ms, scim_max_retries, scim_retry_base_delay_ms, version, updated_at
+    ) VALUES (1, NULL, 'user', 'customsso.com', 3, 250, 3, 1000, 1, ?)
+  `).run(new Date().toISOString());
   addColumnIfMissing(db, 'sso_emu_import_plan_rows', 'copilot_seat_status', 'TEXT');
+  dropLegacyPasswordColumn(db);
 }
 
 function addColumnIfMissing(db: Database.Database, table: string, column: string, definition: string): void {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (columns.some((item) => item.name === column)) return;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+function dropLegacyPasswordColumn(db: Database.Database): void {
+  const columns = db.prepare('PRAGMA table_info(sso_emu_import_plan_rows)').all() as Array<{ name: string }>;
+  if (!columns.some((item) => item.name === 'password_for_login')) return;
+  db.pragma('secure_delete = ON');
+  db.exec('ALTER TABLE sso_emu_import_plan_rows DROP COLUMN password_for_login');
+  db.exec('VACUUM');
+  db.pragma('wal_checkpoint(TRUNCATE)');
 }

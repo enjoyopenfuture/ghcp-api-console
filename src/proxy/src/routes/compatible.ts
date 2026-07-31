@@ -540,7 +540,7 @@ function requireClaudeCodeOptimized(req: Request, res: Response): boolean | unde
 
 function sendCompatibleError(req: Request, res: Response, err: unknown): void {
   if (err instanceof CopilotAuthNotReadyError) {
-    res.status(err.status).json(apiError(err.code, err.message));
+    res.status(err.status).json(apiError(err.code, err.message, err.details));
     return;
   }
   const status = proxyErrorStatus(err);

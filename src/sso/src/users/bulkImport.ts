@@ -1,7 +1,7 @@
 export interface BulkImportRow {
   line: number;
   ssoUser: string;
-  password: string;
+  password?: string;
 }
 
 export interface BulkImportError {
@@ -39,9 +39,9 @@ export function parseBulkImportText(text: string): BulkImportParseResult {
       return;
     }
     const ssoUser = values[0]!.trim();
-    const password = (values[1] ?? ssoUser).trim();
-    if (!ssoUser || !password) {
-      errors.push({ line, ssoUser: ssoUser || undefined, error: 'SSO user and password are required' });
+    const password = values.length === 2 ? values[1]!.trim() : undefined;
+    if (!ssoUser || (values.length === 2 && !password)) {
+      errors.push({ line, ssoUser: ssoUser || undefined, error: 'SSO user is required and an explicit password must not be empty' });
       return;
     }
     const key = ssoUser.toLowerCase();

@@ -4,7 +4,7 @@
 
 ## 核心功能
 
-- **登录任务队列**：`POST /api/tasks` 创建任务，内存队列按 `LOGIN_CONCURRENCY` 控制并发；任务元数据持久化到 SQLite。
+- **登录任务队列**：`POST /api/tasks` 创建任务，内存队列按 DB 运行时设置控制并发；任务元数据持久化到 SQLite。
 - **任务状态管理**：状态包括 `pending`、`running`、`success`、`failed`、`cancelled`；支持列表、分页搜索、查看、取消、删除、重试。服务重启时会把未完成的 `pending/running` 标记为失败。
 - **Device flow + Playwright 自动授权**：先请求 GitHub device code，再用 `playwright-extra` + stealth 插件打开验证页，处理 GitHub 账号选择、GitHub 登录、企业 SSO 中转、自定义 SSO 或 Azure SSO，最后轮询 access token。**这是最消耗资源的部分，单次登陆大约1分钟**。
 - **账号级日志与调试产物**：每个 SSO 用户有独立日志文件；可开启 debug 日志、失败截图和 trace。
@@ -46,7 +46,7 @@ npm --workspace @ghcp/login run build
 node src/login/dist/index.js
 ```
 
-当前 `@ghcp/login` 只提供 `start`、`build`、`typecheck`、`login:token` 脚本；未提供单独的 `start:dist` 或测试脚本。
+`@ghcp/login` 提供 `start`、`start:prod`、`build`、`typecheck`、`test` 和单次登录调试脚本。
 
 ### 调试单次登录
 
@@ -80,13 +80,13 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 
 配置来自 `src/login/src/config.ts`，并通过 `dotenv/config` 读取环境变量。
 
-| 变量 | 默认值 | 必填 | 用途 |
+| 变量 | 代码默认值 | 必填 | 用途 |
 | --- | --- | --- | --- |
 | `PORT` | `7003` | 否 | Login HTTP 端口。 |
+| `LOG_LEVEL` | `info` | 否 | 结构化日志等级：`debug`、`info`、`warn`、`error`。 |
 | `DB_PATH` | `./data/login.sqlite` | 否 | SQLite 文件路径。 |
 | `INTERNAL_API_TOKEN` | 空字符串 | **是** | `/api/*` 入站认证和调用 proxy 的 `X-Internal-Token`；必须与 proxy/console 使用同一值。未设置时内部 API 会拒绝访问。`.env.example` 已提供示例。 |
-| `PROXY_BASE_URL` | `http://localhost:3000` | 视环境 | Token 成功/失败回写的 proxy 地址；`.env.example` 当前未提供。 |
-| `LOGIN_CONCURRENCY` | `1` | 否 | 登录任务并发数，必须为正整数。 |
+| `PROXY_BASE_URL` | `http://localhost:3000` | 视环境 | Token 成功/失败回写的 proxy 地址。 |
 | `LOG_DIR` | `./logs/login` | 否 | 账号级登录日志目录。 |
 | `GITHUB_OAUTH_CLIENT_ID` | `Ov23li8tweQw6odWQebz` | 否 | OpenCode GitHub Device Flow OAuth client id。 |
 | `GITHUB_OAUTH_SCOPE` | `read:user` | 否 | GitHub Device Flow 请求 scope。 |
@@ -96,11 +96,10 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 | `SSO_PROVIDER` | `custom` | 否 | `custom` 或 `azure`；队列任务实际按请求体 `ssoType` 选择 provider。 |
 | `AZURE_STAY_SIGNED_IN` | `false` | 否 | Azure “保持登录”提示选择 Yes/No。 |
 | `AUTH_HEADLESS` | `true` | 否 | Playwright 是否无头运行。 |
-| `AUTH_TIMEOUT_MS` | `60000` | 否 | Playwright 默认超时，必须为正整数。 |
-| `AUTH_DEBUG_LOGS` | `false` | 否 | 是否写入 debug 级账号日志。 |
-| `AUTH_DEBUG_ARTIFACTS` | `false` | 否 | 登录失败时是否保存截图和 trace。 |
 | `AUTH_DEBUG_ARTIFACT_DIR` | `.auth-debug` | 否 | 调试产物目录。 |
 | `AUTH_*_SELECTOR` | 当前未配置 | 否 | 覆盖各登录步骤的 CSS selector，见下方说明。 |
+
+登录并发、Playwright 超时、debug 日志和 debug artifacts 保存在 `login_runtime_settings`，通过 Console Settings 页面保存后对排队任务和新启动任务生效；运行中的任务继续使用启动时快照。
 
 支持的 selector 环境变量：
 
@@ -108,7 +107,24 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 - 通用 SSO：`AUTH_SSO_USERNAME_INPUT_SELECTOR`、`AUTH_SSO_PASSWORD_INPUT_SELECTOR`、`AUTH_SSO_SUBMIT_SELECTOR`
 - Azure SSO：`AUTH_AZURE_USERNAME_INPUT_SELECTOR`、`AUTH_AZURE_NEXT_SUBMIT_SELECTOR`、`AUTH_AZURE_PASSWORD_INPUT_SELECTOR`、`AUTH_AZURE_SIGN_IN_SUBMIT_SELECTOR`、`AUTH_AZURE_STAY_SIGNED_IN_YES_SELECTOR`、`AUTH_AZURE_STAY_SIGNED_IN_NO_SELECTOR`
 
-本模块 `.env.example` 只保留 login 服务会读取的变量；不要加入 proxy/sso 专属配置，例如 `PROXY_API_KEY`、`SCIM_TOKEN`、`ENTERPRISE_SLUG`、`SP_ENTITY_ID`。
+本模块 `.env.example` 只保留 login 服务会读取的变量；不要加入 proxy/sso 专属配置，例如 `API_KEY`、`SCIM_TOKEN`、`ENTERPRISE_SLUG`、`SP_ENTITY_ID`。
+
+### `.env` 与 runtime Settings
+
+环境变量负责端口、内部密钥、Proxy/SSO 地址、SQLite/日志/调试产物路径、OAuth client、headless 模式和 selector 等启动期配置；修改后要重启 Login。Runtime Settings 保存在 `login.sqlite` 的单例 `login_runtime_settings` 行中，通过 Console **Settings** 或 `GET/PATCH /api/settings/runtime` 管理，无需重启。
+
+| Setting | 默认值 | 合法范围 | 生效语义 |
+| --- | ---: | --- | --- |
+| `concurrency` | `1` | 整数 `1..20` | 每个 Login 进程的并发上限。调高后立即启动更多 pending 任务；调低不会中断已运行任务，只限制后续启动。 |
+| `authTimeoutMs` | `60000` | 整数 `5000..600000` | 新启动任务的 Device Flow/Playwright 认证超时；运行中任务保持启动时快照。 |
+| `authDebugLogs` | `false` | boolean | 新启动任务是否写详细账号日志。 |
+| `authDebugArtifacts` | `false` | boolean | 新启动任务是否保存失败截图、trace 等调试产物；目录仍由 `AUTH_DEBUG_ARTIFACT_DIR` 环境变量决定。 |
+
+Settings 更新必须携带当前 `expectedVersion`；其他管理员已先保存时返回 `409 settings_version_conflict`，Console 会重新加载最新值。首次迁移使用上表代码默认值，不从旧 `.env` 导入。当前 settings snapshot 和任务队列都是进程内状态；多个 Login 实例共享 SQLite 时，其他实例不会自动收到 setting 更新，而且任务队列本身也没有分布式领取机制。
+
+配置覆盖关系仅存在于任务层：任务的 `ssoUrl`/`ssoType` 和 `selectorOverrides` 分别覆盖默认 SSO URL/provider 和环境 selector；单次调试 CLI flag 会覆盖对应 runtime setting 或环境变量。Runtime Settings 与 `.env` 没有同名 key。
+
+Login task 历史目前没有 retention setting 或环境变量，也不会自动按条数/时间清理。`success`、`failed`、`cancelled` 任务会保留到通过 Console 或 `DELETE /api/tasks/:id` 手动删除；`pending/running` 不允许删除。
 
 ## 接口与 API 边界
 
@@ -135,6 +151,8 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 | `POST` | `/api/tasks/:id/cancel` | 取消任务。待执行任务会从内存队列移除；运行中的浏览器流程当前未提供强制中断。 |
 | `DELETE` | `/api/tasks/:id` | 删除已结束任务；`pending/running` 返回 `400 task_delete_not_allowed`。 |
 | `POST` | `/api/tasks/:id/retry` | 用原任务的 `identity/ssoUser/ghLogin/ssoType` 重新入队，可在请求体提供新密码、`ssoUrl`、selector 覆盖。 |
+| `GET` | `/api/settings/runtime` | 返回 `LoginRuntimeSettingsDto`，包含四个 setting、`version` 和 `updatedAt`。 |
+| `PATCH` | `/api/settings/runtime` | `{ expectedVersion, changes }`；保存 runtime settings，校验失败返回 400，版本冲突返回 409。 |
 
 创建任务请求核心结构：
 
@@ -184,6 +202,8 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 
 索引：`idx_login_tasks_status_created_at(status, created_at)`。
 
+`login_runtime_settings` 是 `id=1` 的单例严格表，保存 `concurrency`、`auth_timeout_ms`、`auth_debug_logs`、`auth_debug_artifacts`、乐观锁 `version` 和 `updated_at`。Migration 只在不存在时写入代码默认值，不覆盖已经保存的设置。
+
 ### 主要领域对象
 
 - `LoginQueue`：维护内存 `pending` 队列、`active` 集合和 `cancelled` 集合。
@@ -205,7 +225,7 @@ src/login/
 ├── tsconfig.json              # TypeScript 配置
 └── src/
     ├── index.ts               # 入口：startServer()
-    ├── server.ts              # Express app、healthz、/api 挂载
+    ├── server.ts              # Express app、healthz、tasks/settings API 挂载
     ├── config.ts              # 环境变量解析
     ├── debugToken.ts          # 单次登录调试 CLI
     ├── auth/
@@ -214,8 +234,8 @@ src/login/
     │   ├── HeadlessPlaywrightAuthStrategy.ts
     │   └── types.ts
     ├── clients/proxyClient.ts # token 成功/失败回写 proxy
-    ├── db/                    # SQLite 连接、迁移、任务仓库
-    ├── routes/tasksApi.ts     # 任务 REST API
+    ├── db/                    # SQLite 连接、迁移、任务仓库、runtime settings repo
+    ├── routes/                # tasks API 与 settings API
     └── tasks/                 # 队列、执行器、账号日志
 ```
 
@@ -225,6 +245,6 @@ src/login/
 - API 或数据结构变更要同步检查 `@ghcp/shared` contracts，以及调用方 proxy/console 的客户端代码。
 - 新增 SSO provider 不能只改 Playwright 流程；还要扩展 `SsoType`、请求校验、配置、selector、前端/调用方传参。
 - 队列是进程内的；当前未提供多实例分布式锁。共享同一个 SQLite 运行多个 login 实例需要额外设计。
-- 调试失败优先看任务的 `logPath`；复杂页面问题可用 `AUTH_HEADLESS=false`、`AUTH_DEBUG_LOGS=true`、`AUTH_DEBUG_ARTIFACTS=true`。
+- 调试失败优先看任务的 `logPath`；复杂页面问题可用 `AUTH_HEADLESS=false`，并在 Console Settings 中开启 debug logs 和 debug artifacts。
 - `selectorOverrides` 只影响单个任务，适合临时适配页面变更；稳定规则建议放到环境变量。
-- 文档只确认了当前代码已有能力；当前未提供 metrics、OpenAPI 描述或自动化测试脚本。
+- 文档只确认了当前代码已有能力；当前未提供 metrics 或 OpenAPI 描述。测试可运行 `npm --workspace @ghcp/login run test`。

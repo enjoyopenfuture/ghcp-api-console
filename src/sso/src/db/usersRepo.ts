@@ -1,6 +1,7 @@
 import type { CopilotSeatOperation, CopilotSeatStatus, EmuStatus, PageResponse, SsoUserDto } from '@ghcp/shared';
 import { nowIso, pageResponse } from '@ghcp/shared';
 import { getDb } from './connection.js';
+import { readMaxSsoUsers } from './runtimeSettingsRepo.js';
 
 export interface SsoUserRecord extends SsoUserDto {
   passwordHash: string;
@@ -32,6 +33,16 @@ export interface UserListQuery {
   dir?: 'asc' | 'desc';
 }
 
+export class SsoUserLimitReachedError extends Error {
+  constructor(
+    readonly current: number,
+    readonly limit: number,
+  ) {
+    super(`SSO user limit of ${limit} has been reached (${current} users currently exist).`);
+    this.name = 'SsoUserLimitReachedError';
+  }
+}
+
 export function listUsers(query: UserListQuery = {}): PageResponse<SsoUserDto> {
   const page = Math.max(1, Math.trunc(query.page ?? 1));
   const pageSize = Math.max(1, Math.min(Math.trunc(query.pageSize ?? 25), 100));
@@ -49,6 +60,10 @@ export function listUsers(query: UserListQuery = {}): PageResponse<SsoUserDto> {
 
 export function listAllUsers(): SsoUserRecord[] {
   return (getDb().prepare('SELECT * FROM sso_users ORDER BY sso_user ASC').all() as UserRow[]).map(mapRow);
+}
+
+export function countUsers(): number {
+  return (getDb().prepare('SELECT COUNT(*) AS count FROM sso_users').get() as { count: number }).count;
 }
 
 export function getUser(ssoUser: string): SsoUserRecord | undefined {
@@ -70,14 +85,23 @@ export function createUser(input: {
   email: string;
   role?: 'user' | 'admin';
 }): SsoUserRecord {
-  const now = nowIso();
-  getDb()
-    .prepare(`
-      INSERT INTO sso_users (sso_user, password_hash, salt, email, role, emu_status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'not_synced', ?, ?)
-    `)
-    .run(input.ssoUser, input.passwordHash, input.salt, input.email, input.role ?? 'user', now, now);
-  return getUser(input.ssoUser)!;
+  const db = getDb();
+  return db.transaction(() => {
+    const current = countUsers();
+    const limit = readMaxSsoUsers(db);
+    if (limit !== null && current >= limit) {
+      throw new SsoUserLimitReachedError(current, limit);
+    }
+    const now = nowIso();
+    db.prepare(`
+        INSERT INTO sso_users (sso_user, password_hash, salt, email, role, emu_status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'not_synced', ?, ?)
+      `)
+      .run(input.ssoUser, input.passwordHash, input.salt, input.email, input.role ?? 'user', now, now);
+    const created = getUser(input.ssoUser);
+    if (!created) throw new Error(`Failed to read newly created SSO user "${input.ssoUser}".`);
+    return created;
+  }).immediate();
 }
 
 export function updateUser(ssoUser: string, patch: Partial<Pick<SsoUserRecord, 'email' | 'role' | 'passwordHash' | 'salt'>>): SsoUserRecord | undefined {

@@ -36,3 +36,35 @@ test('adds OAuth attempt IDs to existing login task databases idempotently', () 
   );
   db.close();
 });
+
+test('seeds singleton login runtime settings with code defaults idempotently', () => {
+  const db = new Database(':memory:');
+
+  runMigrations(db);
+  runMigrations(db);
+
+  assert.deepEqual(
+    db.prepare(`
+      SELECT id, concurrency, auth_timeout_ms, auth_debug_logs, auth_debug_artifacts, version
+      FROM login_runtime_settings
+    `).all(),
+    [{
+      id: 1,
+      concurrency: 1,
+      auth_timeout_ms: 60_000,
+      auth_debug_logs: 0,
+      auth_debug_artifacts: 0,
+      version: 1,
+    }],
+  );
+  const row = db.prepare('SELECT updated_at FROM login_runtime_settings WHERE id = 1').get() as { updated_at: string };
+  assert.ok(row.updated_at);
+
+  db.prepare('UPDATE login_runtime_settings SET concurrency = 7 WHERE id = 1').run();
+  runMigrations(db);
+  assert.equal(
+    (db.prepare('SELECT concurrency FROM login_runtime_settings WHERE id = 1').get() as { concurrency: number }).concurrency,
+    7,
+  );
+  db.close();
+});

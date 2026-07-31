@@ -1,4 +1,4 @@
-import type { BatchResult, CreateImportEmuPlanRequest, EnsureSsoUserResponse, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUsersRequest, ImportEmuUserStatus, PageResponse, SsoUserBatchRequest, SsoUserBatchRow, SsoUserDto } from '@ghcp/shared';
+import type { BatchResult, CreateImportEmuPlanRequest, EnsureSsoUserResponse, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUsersRequest, ImportEmuUserStatus, PageResponse, SsoUserBatchRequest, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto } from '@ghcp/shared';
 import { errorFields, loggerFor } from '@ghcp/shared';
 import { newBatchId, nowIso } from '@ghcp/shared';
 import { config } from '../config.js';
@@ -17,8 +17,10 @@ import {
 } from '../db/emuImportPlansRepo.js';
 import { appendUserEvent } from '../db/eventLog.js';
 import { deleteProxyAccountsBySsoUser } from '../clients/proxyClient.js';
+import { getSsoRuntimeSettings } from '../db/runtimeSettingsRepo.js';
 import {
   createUser,
+  countUsers,
   deleteUser,
   getUser,
   getUserByGhLogin,
@@ -28,11 +30,13 @@ import {
   updateCopilotSeat,
   updateCopilotSeatFromGitHub,
   updateUser,
+  SsoUserLimitReachedError,
   type SsoUserRecord,
 } from '../db/usersRepo.js';
 import { deleteProvisionedUser, findScimUserByUsername, listScimUsers, suspendUser, syncUser, type ScimEnterpriseRole, type ScimUserResource } from '../scim/scimClient.js';
 import { normalizeHandle } from '../scim/handle.js';
 import { parseBulkImportText } from './bulkImport.js';
+import { knownDefaultPasswordForUser, resolveInitialPassword } from './passwordPolicy.js';
 
 const logger = loggerFor('sso', 'users');
 
@@ -59,16 +63,18 @@ export function ensureUser(identity: string, preferredSsoUser?: string): EnsureS
   const existing = findExistingEnsureUser(identity, preferredSsoUser, candidates);
   if (existing) {
     logger.info('ensure-user', 'SSO user already exists', { identity, ssoUser: existing.ssoUser });
-    return { user: toDto(existing), created: false };
+    const passwordForLogin = knownDefaultPasswordForUser(existing);
+    return { user: toDto(existing), passwordForLogin, created: false };
   }
-  const ssoUser = nextAvailableSsoUser(baseSsoUser || identity);
-  const password = ssoUser;
+  const settings = getSsoRuntimeSettings();
+  const ssoUser = nextAvailableSsoUser(baseSsoUser || identity, settings.userPrefix);
+  const password = resolveInitialPassword(ssoUser);
   const { passwordHash, salt } = hashPassword(password);
   const user = createUser({
     ssoUser,
     passwordHash,
     salt,
-    email: `${ssoUser}@${config.emailDomain}`,
+    email: `${ssoUser}@${settings.emailDomain}`,
     role: 'user',
   });
   appendUserEvent('create', user);
@@ -76,17 +82,29 @@ export function ensureUser(identity: string, preferredSsoUser?: string): EnsureS
   return { user: toDto(user), passwordForLogin: password, created: true };
 }
 
+export function getSsoUserCapacity(): SsoUserCapacityDto {
+  const current = countUsers();
+  const limit = getSsoRuntimeSettings().maxSsoUsers;
+  return {
+    current,
+    limit,
+    remaining: limit === null ? null : Math.max(0, limit - current),
+    reached: limit !== null && current >= limit,
+  };
+}
+
 export function createSsoUser(input: { ssoUser: string; password?: string; email?: string; role?: 'user' | 'admin' }): SsoUserDto {
   const ssoUser = sanitizeSsoUser(input.ssoUser);
   if (!ssoUser) throw new Error('ssoUser is required');
   if (getUser(ssoUser)) throw new Error(`SSO user "${ssoUser}" already exists.`);
-  const password = input.password || ssoUser;
+  const password = resolveInitialPassword(ssoUser, input.password);
+  const settings = getSsoRuntimeSettings();
   const { passwordHash, salt } = hashPassword(password);
   const user = createUser({
     ssoUser,
     passwordHash,
     salt,
-    email: input.email || `${ssoUser}@${config.emailDomain}`,
+    email: input.email || `${ssoUser}@${settings.emailDomain}`,
     role: input.role ?? 'user',
   });
   appendUserEvent('create', user);
@@ -176,14 +194,14 @@ export async function removeCopilotSeatForSsoUser(ssoUser: string): Promise<SsoU
 export async function runSsoUserBatch(input: SsoUserBatchRequest): Promise<BatchResult<SsoUserBatchRow>> {
   const startedAt = nowIso();
   const ssoUsers = uniqueSsoUsers(input.ssoUsers);
-  const rows: SsoUserBatchRow[] = [];
+  let rows: SsoUserBatchRow[];
   logger.info('batch-start', 'Starting SSO user batch operation', { operation: input.operation, total: ssoUsers.length, enterpriseRole: input.enterpriseRole });
-  for (const ssoUser of ssoUsers) {
-    try {
-      const outcome = await runSsoUserBatchRow(ssoUser, input);
-      rows.push({ ssoUser, status: 'success', detail: batchSuccessDetail(input.operation), user: outcome.user, warning: outcome.warning });
-    } catch (err) {
-      rows.push({ ssoUser, status: 'failed', detail: (err as Error).message });
+  if (input.operation === 'sync_emu') {
+    rows = await mapWithConcurrency(ssoUsers, getSsoRuntimeSettings().bulkSyncConcurrency, (ssoUser) => runBatchResultRow(ssoUser, input));
+  } else {
+    rows = [];
+    for (const ssoUser of ssoUsers) {
+      rows.push(await runBatchResultRow(ssoUser, input));
     }
   }
   const failed = rows.filter((row) => row.status === 'failed').length;
@@ -210,8 +228,9 @@ export async function createEmuImportPlan(input: CreateImportEmuPlanRequest = {}
   const targetSsoUser = input.ssoUser?.trim();
   const scimUsers = await loadScimUsersForImport(targetSsoUser);
   const assignedCopilotGhLogins = scimUsers.length > 0 ? await listCopilotSeatAssignments() : new Set<string>();
+  const settings = getSsoRuntimeSettings();
   const plannedRows = scimUsers.length > 0
-    ? buildEmuImportPlan(scimUsers, assignedCopilotGhLogins)
+    ? buildEmuImportPlan(scimUsers, assignedCopilotGhLogins, settings.emailDomain)
     : [{ ssoUser: targetSsoUser ?? '', status: 'failed', detail: 'GH SCIM user was not found.' } satisfies PlannedEmuImportRow];
   const plan = createEmuImportPlanRecord({
     id: newBatchId(),
@@ -238,7 +257,13 @@ export function applyEmuImportPlan(planId: string): ImportEmuPlanDto {
     const localBySsoUser = new Map(localUsers.map((user) => [user.ssoUser.toLowerCase(), user]));
     const localByScimId = new Map(localUsers.filter((user) => user.ghScimId).map((user) => [user.ghScimId!, user]));
     for (const row of pendingRows) {
-      const applied = applyStoredEmuImportRow(row, localBySsoUser, localByScimId);
+      let applied: EmuImportPlanRowRecord;
+      try {
+        applied = applyStoredEmuImportRow(row, localBySsoUser, localByScimId);
+      } catch (err) {
+        if (!(err instanceof SsoUserLimitReachedError)) throw err;
+        applied = { ...row, action: undefined, status: 'failed', detail: err.message };
+      }
       updateEmuImportPlanRow(planId, applied);
     }
     markEmuImportPlanApplied(planId);
@@ -261,10 +286,12 @@ export function importUsers(csvText: string): BatchResult<{ line: number; ssoUse
   for (const row of parsed.rows) {
     try {
       const existing = getUser(row.ssoUser);
-      if (existing) {
+      if (existing && row.password !== undefined) {
         const hashed = hashPassword(row.password);
         updateUser(row.ssoUser, { passwordHash: hashed.passwordHash, salt: hashed.salt });
         rows.push({ line: row.line, ssoUser: row.ssoUser, status: 'updated', detail: 'Updated password' });
+      } else if (existing) {
+        rows.push({ line: row.line, ssoUser: row.ssoUser, status: 'unchanged', detail: 'Existing SSO user password was left unchanged' });
       } else {
         createSsoUser({ ssoUser: row.ssoUser, password: row.password });
         rows.push({ line: row.line, ssoUser: row.ssoUser, status: 'created', detail: 'Created SSO user' });
@@ -311,6 +338,30 @@ async function runSsoUserBatchRow(ssoUser: string, input: SsoUserBatchRequest): 
       return { warning: result.warning };
     }
   }
+}
+
+async function runBatchResultRow(ssoUser: string, input: SsoUserBatchRequest): Promise<SsoUserBatchRow> {
+  try {
+    const outcome = await runSsoUserBatchRow(ssoUser, input);
+    return { ssoUser, status: 'success', detail: batchSuccessDetail(input.operation), user: outcome.user, warning: outcome.warning };
+  } catch (err) {
+    return { ssoUser, status: 'failed', detail: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 function uniqueSsoUsers(ssoUsers: string[]): string[] {
@@ -414,8 +465,8 @@ function listAllStoredEmuImportPlanRows(planId: string): ImportEmuUserRow[] {
   }
 }
 
-function buildEmuImportPlan(scimUsers: ScimUserResource[], assignedCopilotGhLogins: ReadonlySet<string>): PlannedEmuImportRow[] {
-  const candidates = scimUsers.map((scimUser) => toPlannedCandidate(scimUser, assignedCopilotGhLogins));
+function buildEmuImportPlan(scimUsers: ScimUserResource[], assignedCopilotGhLogins: ReadonlySet<string>, emailDomain: string): PlannedEmuImportRow[] {
+  const candidates = scimUsers.map((scimUser) => toPlannedCandidate(scimUser, assignedCopilotGhLogins, emailDomain));
   const duplicateSsoUsers = duplicateValues(candidates.filter(hasScimUser).map((row) => row.ssoUser));
   const localUsers = listAllUsers();
   const localBySsoUser = new Map(localUsers.map((user) => [user.ssoUser.toLowerCase(), user]));
@@ -446,7 +497,7 @@ function buildEmuImportPlan(scimUsers: ScimUserResource[], assignedCopilotGhLogi
         ...candidate,
         action: 'create',
         status: 'pending_create',
-        detail: `Will create SSO user; password will default to ssoUser. Copilot seat: ${candidate.copilotSeatStatus}.`,
+        detail: `Will create SSO user using the configured default password policy. Copilot seat: ${candidate.copilotSeatStatus}.`,
       };
     }
     if (isAlreadyAligned(existing, candidate)) {
@@ -461,7 +512,7 @@ function buildEmuImportPlan(scimUsers: ScimUserResource[], assignedCopilotGhLogi
   });
 }
 
-function toPlannedCandidate(scimUser: ScimUserResource, assignedCopilotGhLogins: ReadonlySet<string>): PlannedEmuImportRow {
+function toPlannedCandidate(scimUser: ScimUserResource, assignedCopilotGhLogins: ReadonlySet<string>, emailDomain: string): PlannedEmuImportRow {
   if (!scimUser.id) {
     return {
       ssoUser: ssoUserFromScimUser(scimUser),
@@ -485,7 +536,7 @@ function toPlannedCandidate(scimUser: ScimUserResource, assignedCopilotGhLogins:
   const copilotSeatStatus = assignedCopilotGhLogins.has(ghLogin.toLowerCase()) ? 'assigned' : 'unassigned';
   return {
     ssoUser,
-    email: primaryEmail(scimUser) || `${ssoUser}@${config.emailDomain}`,
+    email: primaryEmail(scimUser) || `${ssoUser}@${emailDomain}`,
     ghLogin,
     ghScimId: scimUser.id,
     emuStatus,
@@ -508,7 +559,7 @@ function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
     return { ...toImportRow(row), status: 'failed', detail: 'Import plan row is incomplete.' };
   }
   if (row.action === 'create') {
-    const password = row.ssoUser;
+    const password = resolveInitialPassword(row.ssoUser);
     const { passwordHash, salt } = hashPassword(password);
     const created = createUser({ ssoUser: row.ssoUser, passwordHash, salt, email: row.email, role: 'user' });
     updateEmu(created.ssoUser, { ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
@@ -523,8 +574,7 @@ function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
       emuStatus: updated.emuStatus,
       status: 'created',
       copilotSeatStatus: row.copilotSeatStatus,
-      detail: `Created SSO user from GH SCIM; password defaults to ssoUser. Copilot seat: ${updated.copilotSeatStatus}.`,
-      passwordForLogin: password,
+      detail: `Created SSO user using the configured default password policy. Copilot seat: ${updated.copilotSeatStatus}.`,
     };
   }
   if (row.action === 'update') {
@@ -571,7 +621,6 @@ function toImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
     copilotSeatStatus: row.copilotSeatStatus,
     status: row.status,
     detail: row.detail,
-    passwordForLogin: row.passwordForLogin,
   };
 }
 
@@ -635,15 +684,15 @@ function primaryEmail(scimUser: ScimUserResource): string | undefined {
   return scimUser.emails?.find((email) => email.primary)?.value ?? scimUser.emails?.[0]?.value;
 }
 
-function nextAvailableSsoUser(raw: string): string {
-  const base = sanitizeSsoUser(raw) || config.userPrefix;
+function nextAvailableSsoUser(raw: string, userPrefix: string): string {
+  const base = sanitizeSsoUser(raw) || userPrefix;
   if (!getUser(base)) return base;
   for (let i = 2; i < 100_000; i += 1) {
     const candidate = `${base}-${i}`;
     if (!getUser(candidate)) return candidate;
   }
   const count = listAllUsers().length + 1;
-  return `${config.userPrefix}${count}`;
+  return `${userPrefix}${count}`;
 }
 
 function sanitizeSsoUser(raw: string): string {

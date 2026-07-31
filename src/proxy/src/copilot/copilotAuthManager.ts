@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { SsoType } from '@ghcp/shared';
+import { HttpApiError, type EnsureSsoUserResponse, type SsoType } from '@ghcp/shared';
 import {
   beginCopilotOauthAuthorization,
   createAccount,
@@ -16,8 +16,9 @@ import type { CopilotAuthContext } from './copilotAuth.js';
 export class CopilotAuthNotReadyError extends Error {
   constructor(
     readonly status: number,
-    readonly code: 'account_initializing' | 'oauth_not_ready',
+    readonly code: 'account_initializing' | 'account_limit_reached' | 'oauth_not_ready',
     message: string,
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = 'CopilotAuthNotReadyError';
@@ -26,17 +27,19 @@ export class CopilotAuthNotReadyError extends Error {
 
 class CopilotAuthManager {
   private readonly logger = new Logger('copilot-auth-manager');
-  private readonly initializing = new Map<string, Promise<void>>();
+  private readonly initializing = new Map<string, { prepared: Promise<void>; completed: Promise<void> }>();
 
   async getAuth(identity: string): Promise<CopilotAuthContext> {
     const account = getAccount(identity);
     if (!account) {
-      void this.initializeIdentity(identity).catch((err: unknown) => {
-        this.logger.error('identity-init', 'Identity initialization failed', {
-          identity,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
+      try {
+        await this.beginIdentityInitialization(identity);
+      } catch (err) {
+        if (err instanceof HttpApiError && err.code === 'sso_user_limit_reached') {
+          throw new CopilotAuthNotReadyError(409, 'account_limit_reached', err.message, err.details);
+        }
+        throw err;
+      }
       throw new CopilotAuthNotReadyError(202, 'account_initializing', 'Account initialization has started.');
     }
     if (!account.copilotOauthToken || account.copilotOauthStatus !== 'valid') {
@@ -85,17 +88,30 @@ class CopilotAuthManager {
     return invalidateCopilotOauthToken(identity, expectedToken, 'expired');
   }
 
-  private async initializeIdentity(identity: string): Promise<void> {
+  private beginIdentityInitialization(identity: string): Promise<void> {
     const existing = this.initializing.get(identity);
-    if (existing) return existing;
-    const promise = this.initializeIdentityOnce(identity).finally(() => this.initializing.delete(identity));
-    this.initializing.set(identity, promise);
-    return promise;
+    if (existing) return existing.prepared;
+
+    this.logger.info('identity-init', 'Initializing unknown identity', { identity });
+    const ensured = ensureSsoUser({ identity, preferredSsoUser: ssoUserFromIdentity(identity) });
+    const prepared = ensured.then(() => undefined);
+    const completed = ensured.then((result) => this.initializeEnsuredIdentity(identity, result));
+    const state = { prepared, completed };
+    this.initializing.set(identity, state);
+    void completed
+      .catch((err: unknown) => {
+        this.logger.error('identity-init', 'Identity initialization failed', {
+          identity,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        if (this.initializing.get(identity) === state) this.initializing.delete(identity);
+      });
+    return prepared;
   }
 
-  private async initializeIdentityOnce(identity: string): Promise<void> {
-    this.logger.info('identity-init', 'Initializing unknown identity', { identity });
-    const ensured = await ensureSsoUser({ identity, preferredSsoUser: ssoUserFromIdentity(identity) });
+  private async initializeEnsuredIdentity(identity: string, ensured: EnsureSsoUserResponse): Promise<void> {
     const synced = await syncEmuUser(ensured.user.ssoUser);
     if (!synced.ghLogin) throw new Error(`SSO user "${ensured.user.ssoUser}" did not return a GH login.`);
     const oauthAttemptId = randomUUID();
@@ -106,10 +122,10 @@ class CopilotAuthManager {
       copilotOauthStatus: 'refreshing',
       copilotOauthAttemptId: oauthAttemptId,
     });
-    const ssoPassword = ensured.passwordForLogin ?? ensured.user.ssoUser;
+    const ssoPassword = ensured.passwordForLogin;
     if (!ssoPassword) {
       failCopilotOauthAuthorization(identity, oauthAttemptId);
-      throw new Error(`SSO did not return a login password for newly initialized identity "${identity}".`);
+      throw new Error(`SSO password is required to initialize identity "${identity}"; reauthorize it from Console with an explicit password.`);
     }
     try {
       await createLoginTask({

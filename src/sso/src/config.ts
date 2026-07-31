@@ -8,8 +8,7 @@ export interface SsoConfig {
   proxyBaseUrl: string;
   mockGithubBaseUrl: string;
   sessionSecret: string;
-  emailDomain: string;
-  userPrefix: string;
+  defaultUserPassword?: string;
   eventLogPath: string;
   enterpriseSlug: string;
   enterpriseShortcode: string;
@@ -17,10 +16,6 @@ export interface SsoConfig {
   githubCopilotSeatPat?: string;
   scimBaseUrl: string;
   scimToken: string;
-  scimRequestDelayMs: number;
-  scimMaxRetries: number;
-  scimRetryBaseDelayMs: number;
-  bulkSyncConcurrency: number;
   certDir: string;
   spEntityId: string;
   spAcsUrl: string;
@@ -34,8 +29,7 @@ export const config: SsoConfig = {
   proxyBaseUrl: process.env.PROXY_BASE_URL ?? 'http://localhost:3000',
   mockGithubBaseUrl: process.env.MOCK_GITHUB_BASE_URL ?? 'http://localhost:8002',
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-secret-change-me',
-  emailDomain: process.env.SSO_EMAIL_DOMAIN ?? 'customsso.com',
-  userPrefix: process.env.USER_PREFIX ?? 'user',
+  defaultUserPassword: process.env.SSO_DEFAULT_USER_PASSWORD || undefined,
   eventLogPath: process.env.SSO_USER_EVENTS_LOG ?? './data/sso-user-events.log',
   enterpriseSlug: process.env.ENTERPRISE_SLUG ?? 'acme',
   enterpriseShortcode: process.env.ENTERPRISE_SHORTCODE ?? 'octo',
@@ -43,10 +37,6 @@ export const config: SsoConfig = {
   githubCopilotSeatPat: process.env.GITHUB_COPILOT_SEAT_PAT,
   scimBaseUrl: process.env.SCIM_BASE_URL ?? '',
   scimToken: process.env.SCIM_TOKEN ?? '',
-  scimRequestDelayMs: readNonNegativeInteger(process.env.SCIM_REQUEST_DELAY_MS, 250),
-  scimMaxRetries: readNonNegativeInteger(process.env.SCIM_MAX_RETRIES, 3),
-  scimRetryBaseDelayMs: readNonNegativeInteger(process.env.SCIM_RETRY_BASE_DELAY_MS, 1000),
-  bulkSyncConcurrency: readPositiveInteger(process.env.BULK_SYNC_CONCURRENCY, 3),
   certDir: process.env.CERT_DIR ?? '../../certs',
   spEntityId: process.env.SP_ENTITY_ID ?? '',
   spAcsUrl: process.env.SP_ACS_URL ?? '',
@@ -55,17 +45,5 @@ export const config: SsoConfig = {
 function readPort(value: string | undefined, defaultValue: number): number {
   const parsed = Number(value ?? defaultValue);
   if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) throw new Error(`Invalid PORT "${value}".`);
-  return parsed;
-}
-
-function readPositiveInteger(value: string | undefined, defaultValue: number): number {
-  const parsed = Number(value ?? defaultValue);
-  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`Invalid positive integer "${value}".`);
-  return parsed;
-}
-
-function readNonNegativeInteger(value: string | undefined, defaultValue: number): number {
-  const parsed = Number(value ?? defaultValue);
-  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`Invalid non-negative integer "${value}".`);
   return parsed;
 }
