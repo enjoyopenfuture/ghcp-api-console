@@ -90,7 +90,7 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 | `SSO_BASE_URL` | `http://localhost:7001` / 同 | 否 | SSO 服务地址；用于确保用户、读取 SSO 用户、同步 EMU。 |
 | `LOGIN_BASE_URL` | `http://localhost:7003` / 同 | 否 | Login 服务地址；用于创建 Copilot OAuth 重新授权任务。 |
 | `ENTERPRISE_SHORTCODE` | `octo` / `octo` | 否 | 初始化身份时从规范化 identity 末尾剥离 `_<shortcode>`，生成 SSO 用户名。 |
-| `REQUEST_STATS_PER_ACCOUNT_LIMIT` | `100` / `100` | 否 | 每个 identity 保留的请求统计条数；必须为正整数。 |
+| `REQUEST_STATS_PER_ACCOUNT_LIMIT` | `2` / `2` | 否 | 每个 identity 保留的请求统计条数；必须为正整数。 |
 | `PROXY_ERROR_DIAGNOSTICS_ENABLED` | `true` / `true` | 否 | 是否保存 Copilot 上游失败诊断。关闭后控制台错误摘要仍会输出。 |
 | `PROXY_ERROR_DIAGNOSTICS_DIR` | `./data/error-diagnostics` / 同 | 否 | 轮转文本日志目录；Compose 使用 `/data/error-diagnostics`。 |
 | `PROXY_ERROR_DIAGNOSTICS_REDACT` | `false` / `false` | 否 | 是否脱敏敏感 headers 和 JSON 字段。默认不脱敏，会保存凭据与完整用户内容。 |
@@ -105,7 +105,7 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 
 Proxy 当前没有 runtime settings 表、Settings 页面字段或 `/api/settings/runtime` 接口；上表全部是启动期环境变量，修改后需要重启 Proxy。密钥、服务地址和数据库路径不会写入 SQLite。
 
-`REQUEST_STATS_PER_ACCOUNT_LIMIT` 是 env-only 的数据保留策略：每次写入统计后清理当前 identity 的旧记录，服务启动时还会对所有 identity 清理一次。代码默认值和 `src/proxy/.env.example` 都是 `100`；根 `.env.example` 当前显式设置为 `2`，因此直接复制根模板启动 Compose 时实际保留 2 条。该值必须是正整数。
+`REQUEST_STATS_PER_ACCOUNT_LIMIT` 是 env-only 的数据保留策略：每次写入统计后清理当前 identity 的旧记录，服务启动时还会对所有 identity 清理一次。代码、Compose fallback、根 `.env.example` 和 `src/proxy/.env.example` 均默认为 `2`。该值必须是正整数。
 
 错误诊断同样是 env-only。默认启用并写入 `diagnostics.log`、`diagnostics.1.log` 等轮转文件；Compose 的目录位于现有 `proxy-data` volume，容器重启后仍保留。每条记录直接列出 headers、格式化后的 JSON/text body、入站请求和实际上游请求的 curl 命令。`PROXY_ERROR_DIAGNOSTICS_REDACT=false` 时，文件会原样包含 API Key、Copilot Authorization、用户 prompt、工具参数和响应内容，必须限制 volume、备份和 Console 管理员权限。设置为 `true` 后会脱敏敏感 headers，并递归脱敏可安全解析的 JSON；无法安全脱敏的非 JSON 或不完整 body 不写正文。
 

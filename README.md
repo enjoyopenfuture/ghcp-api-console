@@ -132,7 +132,7 @@ cp .env.example .env
 | `IDENTITY_HEADER` | 调用方身份 header 名称和是否必填；默认 `X-User-Identity` 必填。 |
 | `IDENTITY_HEADER_REQUIRED` | 调用方身份 header 是否必填；默认 `true`。如果设置为 false，则 Identity header 可选。identity header 为空时，默认使用匿名身份。当前匿名用户为 `default` |
 | `CLAUDE_CODE_OPTIMIZED` | Proxy 的默认 Claude Code 优化模式；代码默认 `false`，Compose 默认和根模板均为 `true`。 |
-| `REQUEST_STATS_PER_ACCOUNT_LIMIT` | 每个 identity 保留的请求统计数；代码和 Compose fallback 为 `100`，根 `.env.example` 当前显式设置为 `2`。 |
+| `REQUEST_STATS_PER_ACCOUNT_LIMIT` | 每个 identity 保留的请求统计数；代码、Compose fallback 和环境变量示例均默认为 `2`。 |
 | `PROXY_ERROR_DIAGNOSTICS_ENABLED` | 是否保存 Copilot 上游失败现场；默认 `true`。 |
 | `PROXY_ERROR_DIAGNOSTICS_DIR` | 人类可读诊断日志目录；Compose 默认 `/data/error-diagnostics`，位于 `proxy-data` volume。 |
 | `PROXY_ERROR_DIAGNOSTICS_REDACT` | 是否脱敏诊断中的敏感 headers 和 JSON 字段；默认 `false`，即保留原始凭据和请求内容。 |
@@ -178,6 +178,8 @@ http://localhost:7004
 ```
 
 首次访问会创建本地控制台管理员。之后可以在控制台管理 SSO 用户、EMU 同步、Proxy 账号、登录任务、Copilot OAuth 重授权/导入、请求统计和 Error Diagnostics；管理员可在 **Settings** 修改自己的 Console 密码。
+
+> **SSO 改密与自动登录**：SSO 只保存密码哈希，不能把修改后的任意密码提供给 Login。若新密码不是当前 `SSO_DEFAULT_USER_PASSWORD` 或该用户的 `ssoUser`，后续自动初始化无法取得密码；请在 Console 的 **Reauthorize Copilot OAuth** 中手动输入新密码。Login 仅使用该次请求提供的密码执行任务，不会把密码保存到任务历史。
 
 ## 调用 API
 

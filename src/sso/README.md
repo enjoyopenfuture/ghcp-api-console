@@ -37,6 +37,10 @@ SSO 模块负责“本地 SSO 用户 ↔ GitHub Enterprise Managed User(EMU)”�
 - CSV 导入支持 `ssoUser` 或 `ssoUser,password`；省略密码时只为新用户应用默认密码，已有用户保持不变。
 - 删除本地 SSO 用户当前只通过 batch 的 `delete_sso` 操作提供。
 
+#### 密码修改与 Login
+
+SSO 数据库只保存 scrypt 密码哈希和 salt，不能还原用户的明文密码。`POST /users/ensure` 处理已有用户时，只会依次验证当前 `SSO_DEFAULT_USER_PASSWORD` 和该用户的 `ssoUser`；匹配时才返回 `passwordForLogin`。因此，通过 Console、`PATCH /users/:ssoUser` 或 CSV 导入将密码修改为其他值后，SSO 仍可使用新密码完成 SAML 登录，但不能把该密码自动提供给 Login，未知 identity 的自动初始化会因缺少密码而失败。管理员需要在 Console 的 **Reauthorize Copilot OAuth** 中重新输入新密码。
+
 ### SCIM / EMU
 
 - `sync_emu`：将本地 `ssoUser` 同步到 GitHub SCIM，保存 `ghScimId`、`ghLogin`，并标记 `emuStatus=active`。

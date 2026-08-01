@@ -11,6 +11,10 @@
 - **Token 回传 Proxy**：成功时调用 `proxy` 的 `/internal/accounts/:identity/copilot-oauth-token` 保存 token；失败时调用 `/internal/accounts/:identity/mark-copilot-oauth-failed` 标记失败。
 - **单账号调试命令**：`login:copilot-oauth` 可跳过任务队列，直接登录并把原始 Copilot OAuth token 输出到 stdout。
 
+### SSO 密码来源与改密影响
+
+Login 不从 SSO 数据库读取或还原密码。创建或重试任务必须提供明文 `ssoPassword`，该密码仅保留在运行时用于当前登录，不会写入 `login_tasks` 或任务历史。对于已有 SSO 用户，Proxy 的自动初始化只能使用 SSO `/users/ensure` 返回的 `passwordForLogin`；SSO 仅能识别当前默认密码或与用户名相同的密码。用户改成其他密码后，需要在 Console 的 **Reauthorize Copilot OAuth** 中手动输入新密码，否则自动初始化无法创建可执行的登录任务。
+
 ## 启动方式
 
 先在仓库根目录安装依赖：

@@ -2,7 +2,7 @@
 
 本文面向第一次接触 GitHub Enterprise 管理、Enterprise Managed Users(EMU)、SAML SSO、SCIM、GitHub Copilot seat 和本项目部署配置的读者。目标是帮助你从零完成 GitHub Enterprise EMU 初始化、本项目 SSO/Console/Proxy/Login 服务配置、Copilot 授权管理，以及最终用户侧 API 调用验证。
 
-> 重要：GitHub Copilot 当前不提供面向第三方服务端集成的正式公开裸 API。本项目依赖 GitHub Copilot 内部接口，适合学习、验证和自维护部署。用于生产前，需要**自行评估**合规、稳定性、安全、账号管理、日志留存和运维风险。
+> **重要**：GitHub Copilot 当前不提供面向第三方服务端集成的正式公开裸 API。本项目依赖 GitHub Copilot 内部接口，适合学习、验证和自维护部署。用于生产前，需要**自行评估**合规、稳定性、安全、账号管理、日志留存和运维风险。
 
 ## 1. 你最终会配置出什么
 
@@ -231,7 +231,7 @@ CONSOLE_PORT=7004
 | `IDENTITY_HEADER` | `X-User-Identity` | Proxy 用于区分最终用户的 header 名。 |
 | `IDENTITY_HEADER_REQUIRED` | `true` | 建议保持 `true`；设为 `false` 且请求缺 header 时会使用共享的 `default` identity。 |
 | `CLAUDE_CODE_OPTIMIZED` | Compose 默认 `true`；代码默认 `false` | Proxy 的 Claude Code/Anthropic Messages 默认兼容模式；单个请求可用 `X-Claude-Code-Optimized` 覆盖。 |
-| `REQUEST_STATS_PER_ACCOUNT_LIMIT` | 根模板为 `2`；代码和 Compose fallback 为 `100` | 每个 identity 保留的最近请求统计数，必须为正整数。直接复制当前根模板时实际只保留 2 条。 |
+| `REQUEST_STATS_PER_ACCOUNT_LIMIT` | `2` | 每个 identity 保留的最近请求统计数，必须为正整数；代码、Compose fallback 和环境变量示例默认值一致。 |
 | `PROXY_ERROR_DIAGNOSTICS_ENABLED` | `true` | 是否保存 Copilot 上游 HTTP、网络和响应流失败现场。 |
 | `PROXY_ERROR_DIAGNOSTICS_DIR` | Compose 为 `/data/error-diagnostics` | 人类可读诊断日志目录；默认位于 `proxy-data` volume。 |
 | `PROXY_ERROR_DIAGNOSTICS_REDACT` | `false` | 是否脱敏敏感 headers 和 JSON 字段；默认不脱敏。 |
@@ -616,11 +616,11 @@ Proxy 错误诊断默认每文件 50 MB、最多 5 个文件，按大小轮转�
 
 ### 12.1 Dashboard
 
-Dashboard 用于查看整体运行状态，包括 proxy accounts、SSO users、login tasks、request stats 汇总，以及近期失败任务和失败请求。
+Dashboard 用于查看整体运行状态。顶部指标卡展示 Proxy account 总数及 valid 数、SSO user 总数及 active 数、近期 Login task 失败数，以及近期请求的 input/output/cache token 汇总；下方分别列出最近失败的登录任务和 Proxy 请求。
 
 ![Dashboard 页面](images/05.0.dashboard.png)
 
-建议日常先看 Dashboard。如果失败任务数量增加，再进入对应页面排查。
+建议日常先看 Dashboard。Login failures 增加时进入 Login Tasks；Recent failed proxy requests 出现记录时，根据 failure 摘要继续检查 Request Stats、Proxy Accounts 或 Error Diagnostics。
 
 ### 12.2 SSO Users
 
@@ -630,13 +630,12 @@ SSO Users 页面用于管理本地 SSO 用户和 GitHub EMU 同步。
 
 常用操作：
 
-- 查询 SSO 用户。
-- 创建单个 SSO 用户。
+- 按 SSO user、email 或 GH login 查询用户，并查看当前用户数、`maxSsoUsers` 上限和剩余容量。
+- 创建单个用户，或通过 Batch create / Import CSV 批量创建用户。
 - 编辑用户密码、邮箱(邮箱是sso同步到gh emu时必须的字段)、角色。
-- CSV 批量导入用户。
-- 执行 `Sync GH login`，把本地用户同步到 GitHub Enterprise EMU。
-- 分配或移除 Copilot seat。
-- 删除或暂停 EMU 用户。
+- 勾选一个或多个用户后，批量执行 `Sync GH login`、分配或移除 Copilot seat、暂停或删除 GH login，以及删除本地 SSO 用户。
+
+批量操作按钮在未选择用户时不可用。删除本地 SSO 用户与删除/暂停 GitHub EMU 的影响不同，执行红色删除操作前应确认目标和影响范围。编辑密码后，SSO 只保留密码哈希；如果新密码不是当前默认密码或用户名，后续自动登录不能从 SSO 取得明文密码，需要在 Proxy Accounts 中重新授权时手动输入。
 
 如果 GitHub Enterprise 中已有用户，也可以从 GitHub/SCIM 反向导入。这个功能请慎用，主要是为了两个系统之间对账用。
 
@@ -665,7 +664,7 @@ Request Stats 页面用于查看 proxy 接收的请求统计，包括路径、�
 
 ![Request Stats 与 token 页面](images/05.3.token-view.png)
 
-当前根 `.env.example` 将每个账号的保留条数设为 `REQUEST_STATS_PER_ACCOUNT_LIMIT=2`；如果完全未配置，Compose 和代码默认值都是 `100`。记录保存在 Proxy SQLite 中，建议根据排障窗口和磁盘容量调整，并避免无上限增长。排查模型不可用、路径不匹配或 Copilot OAuth token 失效时，优先查看这里。
+`REQUEST_STATS_PER_ACCOUNT_LIMIT` 的代码默认值、Compose fallback 和环境变量示例均为 `2`。记录保存在 Proxy SQLite 中，可根据排障窗口和磁盘容量调整；该限制按 identity 分别生效。排查模型不可用、路径不匹配或 Copilot OAuth token 失效时，优先查看这里。
 
 ### 12.5 Proxy Accounts
 
@@ -675,11 +674,13 @@ Proxy Accounts 页面展示当前 proxy 中生效的账号状态。
 
 常用操作：
 
-- 查看 identity、SSO 用户、GitHub login 的映射。
+- 按 identity、SSO user 或 GH login 搜索，并查看三者的映射。
 - 查看 Copilot OAuth 状态：`valid`、`expired`、`missing`、`refreshing`、`failed`。
-- 使用该 SSO 用户的实际密码重新授权 Copilot；这会创建 `login` 自动登录任务。
+- 勾选一个账号后查看 Details，或使用该 SSO 用户的实际密码执行 Reauthorize Copilot；这会创建 `login` 自动登录任务。
 - 按 `name,copilotOauthToken` CSV 格式批量导入 Copilot OAuth token。SSO 用户必须已存在，导入时会调用 Copilot `/models` 验证 token，且不会把已存 token 回显到页面。
-- 删除 Proxy account 及其 request stats。该操作不会删除 SSO/GitHub 用户；该 identity 的后续请求可能重新触发初始化。
+- 勾选一个或多个账号后批量删除 Proxy account 及其 request stats。该操作不会删除 SSO/GitHub 用户；对应 identity 的后续请求可能重新触发初始化。
+
+Details 和 Reauthorize Copilot 只适用于单个账号，未选择或同时选择多个账号时按钮不可用；Delete selected 支持多选。页面右上方的 Refresh list 用于重新读取最新 OAuth 状态。
 
 如果用户请求一直返回初始化中或 token 相关错误，通常需要同时检查 Proxy Accounts 和 Login Tasks。
 
@@ -705,9 +706,11 @@ Login Tasks 页面展示 `login` 服务的自动登录任务。
 
 Settings 页面包含 Console administrator password、SSO runtime settings 和 Login runtime settings。
 
+![Settings 页面](images/05.5.console-setting.png)
+
 修改 Console 管理员密码时必须输入当前密码、新密码和确认密码。保存成功后，新密码立即用于后续登录，当前浏览器 session 保持登录；密码会以新的随机 salt 和 scrypt hash 写回 `ADMINS_FILE`，不会保存明文。
 
-SSO 和 Login runtime Settings 对应第 6.5 节，不需要重启对应服务。保存时使用版本号进行乐观锁；如果页面数据已经过期，会提示冲突，此时刷新后再修改。
+SSO runtime settings 包括最大用户数、fallback user prefix、默认 email domain、EMU 同步并发、SCIM 请求间隔和重试参数；Login runtime settings 包括登录并发、认证超时、debug 日志和 debug artifacts。它们对应第 6.5 节，不需要重启对应服务。每组设置独立保存，并显示当前版本和最后更新时间；保存时使用版本号进行乐观锁，如果页面数据已经过期，会提示冲突，此时刷新后再修改。
 
 这些值缓存在各服务进程内。当前多实例部署不会自动广播缓存失效，因此不能把 Settings 页面视为已具备多节点一致性的配置中心。
 
@@ -715,12 +718,14 @@ SSO 和 Login runtime Settings 对应第 6.5 节，不需要重启对应服务�
 
 Error Diagnostics 页面用于排查 Copilot 上游错误。Proxy 在以下场景生成记录：
 
+![Error Diagnostics 页面](images/05.6.error-request-diagnostics.png)
+
 - Copilot 返回 HTTP 4xx/5xx；
 - fetch 连接、DNS、网络或 abort 失败；
 - JSON/SSE/其他响应流读取中断；
 - `/v1/messages/count_tokens` 上游返回 404/405/501，随后使用本地估算。
 
-控制台常规日志只输出摘要和 `diagnosticId`。页面列表按最新优先显示时间、identity、path、model、失败类型、状态码和 body 大小；打开详情可直接阅读逐行 headers、格式化 JSON/text body、可复制 curl、客户端原始请求、Claude Code 兼容处理后实际发送的请求，以及上游响应/异常。页面预览为避免浏览器卡顿会限制长度，**Download** 下载完整 `.log`。**Clear all** 会删除所有轮转文件且不可恢复。
+页面顶部会显示 Collection enabled/disabled 和 Redacted/Unredacted 状态，先确认采集与脱敏配置是否符合预期。控制台常规日志只输出摘要和 `diagnosticId`。页面列表按最新优先显示时间、identity、route/model、失败类型、状态码，以及入站、实际上游请求和上游响应的 body 大小；打开 Details 可直接阅读逐行 headers、格式化 JSON/text body、可复制 curl、客户端原始请求、Claude Code 兼容处理后实际发送的请求，以及上游响应/异常。页面预览为避免浏览器卡顿会限制长度，**Download** 下载完整 `.log`。**Clear all** 会删除所有轮转文件且不可恢复。
 
 默认 `PROXY_ERROR_DIAGNOSTICS_REDACT=false`，因此详情和下载可能包含：
 
