@@ -53,8 +53,8 @@ SAML SSO 解决“用户如何登录 GitHub Enterprise”的问题；SCIM 解决
 - `sso` 服务扮演自定义 SAML IdP。
 - GitHub Enterprise 作为 SAML SP。
 - `sso` 服务使用 GitHub SCIM API 把本地用户同步为 EMU。
-- SAML 配置中的 Sign on URL 指向 `https://<sso-public-base-url>/sso`。
-- SAML 配置中的 Issuer 指向 `https://<sso-public-base-url>/metadata`。
+- SAML 配置中的 Sign on URL 指向 `<sso-base-url>/sso`。
+- SAML 配置中的 Issuer 指向 `<sso-base-url>/metadata`。
 - Public certificate 来自 `certs/idp-cert.pem`。
 
 ### 2.3 PAT、Copilot seat 与 AI Credits
@@ -86,7 +86,7 @@ SAML SSO 解决“用户如何登录 GitHub Enterprise”的问题；SCIM 解决
 | 管理邮箱 | 用于接收初始超级管理员密码重置邮件，必须是真实可访问邮箱。 |
 | Copilot 开通 | Enterprise 需要能开通 GitHub Copilot；必要时可提交 GitHub Support 工单。 |
 | Billing | 可填写 GitHub Enterprise billing 信息，并可关联 Azure Subscription 或其他账单方式。 |
-| 网络 | `sso` 服务需要有 GitHub 可访问的公网地址。 |
+| 网络 | 执行 SAML 登录的浏览器必须能访问 `sso`；可选择公网地址，或让服务器端 Login 浏览器通过 Docker 内网访问。服务器还需能访问 GitHub、SCIM 和 Copilot API。 |
 | 证书 | 准备 SAML IdP 证书和私钥；开发验证可用 `scripts/gen-certs.sh` 生成。 |
 | 运行环境 | Docker / Docker Compose；本地开发还需要 Node.js 22 和 npm。 |
 
@@ -110,7 +110,7 @@ Enterprise、Billing、管理员身份和 EMU 用户资料会影响企业验证�
 | --- | --- | --- |
 | `ENTERPRISE_SLUG` | `acme` | GitHub Enterprise slug。不是贴enterprise的地址，是一个字符串。 |
 | `ENTERPRISE_SHORTCODE` | `open` | EMU 登录名后缀。 |
-| `SSO_PUBLIC_BASE_URL` | `https://sso.example.com` | GitHub 可访问的 SSO 公网地址。 |
+| `SSO_PUBLIC_BASE_URL` | `https://sso.example.com` 或 `http://sso:7001` | SAML IdP 基础地址；根据 SSO 是否对公网开放选择。 |
 | `SCIM_BASE_URL` | `https://api.github.com/scim/v2/enterprises/acme` | GitHub Enterprise SCIM API 地址。 |
 | `SP_ENTITY_ID` | `https://github.com/enterprises/acme` | GitHub Enterprise SAML SP entity ID。 |
 | `SP_ACS_URL` | `https://github.com/enterprises/acme/saml/consume` | GitHub Enterprise SAML ACS 地址。 |
@@ -203,7 +203,7 @@ cp .env.example .env
 | `API_KEY` | 调用 `proxy` 公共 API 使用。调用方用 `Authorization: Bearer <API_KEY>` 或 `x-api-key: <API_KEY>`。 |
 | `INTERNAL_API_TOKEN` | 内部 API 共享密钥。`proxy`、`sso`、`login`、`console` 必须一致。 |
 | `SESSION_SECRET` | `sso` / `console` cookie session 签名密钥。生产环境必须使用强随机值。 |
-| `SSO_PUBLIC_BASE_URL` | `sso` 服务对 GitHub 可访问的公网地址。 |
+| `SSO_PUBLIC_BASE_URL` | SAML 配置中使用的 SSO 基础地址。该地址必须与 GitHub 中配置的 IdP 地址一致，并可由执行登录的浏览器访问；登录完全在服务器端执行时不要求对公网开放。 |
 | `SP_ENTITY_ID` | `https://github.com/enterprises/<enterprise-slug>`。 |
 | `SP_ACS_URL` | `https://github.com/enterprises/<enterprise-slug>/saml/consume`。 |
 | `ENTERPRISE_SLUG` | 创建 EMU 时填写的 slug。 |
@@ -211,7 +211,7 @@ cp .env.example .env
 | `SCIM_BASE_URL` | `https://api.github.com/scim/v2/enterprises/<enterprise-slug>`。 |
 | `SCIM_TOKEN` | 第 5 节生成的 SCIM token。 |
 | `GITHUB_COPILOT_SEAT_PAT` | 第 9 节创建的 GitHub 管理 PAT；此时还没有可以先留空，创建后再补。 |
-| `LOGIN_SSO_URL` | Login 容器内 Playwright 能访问的完整 SSO 登录页。Compose 内部通常使用 `http://sso:7001/login`；跨网络部署时使用从 Login 节点可访问的完整 `/login` URL。 |
+| `LOGIN_SSO_URL` | Login 容器内 Playwright 能访问的完整 SSO 登录页。Compose 内部使用 `http://sso:7001/login`；不要使用 `127.0.0.1` 或 `localhost`，它们指向 Login 容器自身。跨网络部署时使用从 Login 节点可访问的完整 `/login` URL。 |
 
 如果使用 Docker Compose，默认端口来自 `.env`：
 
@@ -223,6 +223,87 @@ CONSOLE_PORT=7004
 ```
 
 这些端口变量只控制暴露到宿主机的端口；容器内端口固定为 `3000`、`7001`、`7003`、`7004`。服务间地址由 Compose 固定为 `proxy:3000`、`sso:7001`、`login:7003`，不要在容器间调用中使用宿主机 `localhost`。
+
+### 6.1.1 选择 SSO 地址与端口暴露模式
+
+GitHub EMU 中配置的 **Sign on URL** 是 SAML 身份提供商（IdP）的登录入口。用户登录时，GitHub 让执行登录的浏览器跳转到该地址完成身份认证，GitHub 后端不会代替浏览器打开 SSO 登录页。认证成功后，IdP 返回一个自动提交的 HTML 表单，由浏览器把经过签名的 `SAMLResponse` POST 到 GitHub 的 ACS 地址。GitHub 验证响应的签名、Issuer、Audience、有效期等信息后，才会建立登录会话并允许用户继续访问。
+
+本项目中的“浏览器”默认是 Login 容器内的 Playwright，而不是用户电脑上的浏览器，因此 SAML 登录过程如下：
+
+```mermaid
+sequenceDiagram
+    participant B as Login 容器中的 Playwright
+    participant G as GitHub（SAML SP）
+    participant S as SSO 服务（SAML IdP）
+
+    B->>G: 打开 GitHub 登录或 Device Flow 页面
+    G-->>B: 跳转到 Sign on URL，并携带 SAMLRequest
+    B->>S: GET /sso?SAMLRequest=...
+    S-->>B: 跳转到 /login
+    B->>S: POST /login（SSO 用户名和密码）
+    S-->>B: 返回自动提交的表单和签名 SAMLResponse
+    B->>G: POST SAMLResponse 到 GitHub ACS
+    G->>G: 验证签名、Issuer、Audience 和有效期
+    G-->>B: 登录成功，继续 GitHub 授权流程
+```
+
+关键点是：访问 Sign on URL 和提交 `SAMLResponse` 的都是执行登录的浏览器，GitHub 负责发起跳转并验证 SAML 响应。因此，当登录完全由 Login 容器执行时，SSO 地址只需对 Login 容器可达；如果用户自己的浏览器也要直接登录 GitHub，该地址就必须能被用户浏览器访问。
+
+本项目默认由 Login 容器中的 Playwright 完成登录，因此可以选择公网模式或仅 Docker 内网模式。无论选择哪种模式，`SSO_PUBLIC_BASE_URL`、`LOGIN_SSO_URL` 和 GitHub SAML 配置中的地址必须使用同一个 base URL。
+
+#### 模式一：SSO 对公网开放（测试方案时使用）
+
+适用于用户浏览器需要直接完成 SAML 登录，或者 Login 服务不在同一个 Docker 网络中的部署。如果使用公网，生产环境建议由 HTTPS 反向代理提供公网入口，而不是直接暴露 SSO 容器的 HTTP 端口。
+
+例如公网入口为 `https://sso.example.com`：
+
+```env
+SSO_PUBLIC_BASE_URL=https://sso.example.com
+LOGIN_SSO_URL=https://sso.example.com/login
+```
+
+GitHub EMU 的 SAML 页面填写：
+
+```text
+Sign on URL: https://sso.example.com/sso
+Issuer:      https://sso.example.com/metadata
+```
+
+如果只用于受控环境测试，并明确要把宿主机 7001 直接开放到公网，可保留 `docker-compose.yml` 中现有映射：
+
+```yaml
+ports:
+  - "${SSO_PORT:-7001}:7001"
+```
+
+此映射默认监听宿主机所有网络接口，还必须在云安全组或防火墙中允许 TCP 7001。直接使用该端口时，三个地址应分别为 `http://<服务器公网地址>:7001`、`http://<服务器公网地址>:7001/login`、`http://<服务器公网地址>:7001/sso`；该 HTTP 方式不建议用于生产环境。
+
+#### 模式二：SSO 不对公网开放（建议生产环境使用）
+
+适用于登录完全由同一 Compose 网络内的 Login 容器执行的部署。配置为：
+
+```env
+SSO_PUBLIC_BASE_URL=http://sso:7001
+LOGIN_SSO_URL=http://sso:7001/login
+```
+
+GitHub EMU 的 SAML 页面填写：
+
+```text
+Sign on URL: http://sso:7001/sso
+Issuer:      http://sso:7001/metadata
+```
+
+这里的 `sso` 是 Compose 服务名，只能由同一 Docker 网络中的容器解析。虽然地址保存在 GitHub 配置中，实际访问它的是 Login 容器中的 Playwright，因此 GitHub 公网和用户电脑不需要解析 `sso`。
+
+要彻底取消宿主机端口暴露，请删除 `docker-compose.yml` 中 `sso` 服务的整个 `ports` 配置；容器仍可通过 `http://sso:7001` 访问。若需要从宿主机本地调试但不允许外部访问，可改为：
+
+```yaml
+ports:
+  - "127.0.0.1:${SSO_PORT:-7001}:7001"
+```
+
+此时宿主机通过 `http://127.0.0.1:7001` 访问，Login 容器仍使用 `http://sso:7001`。不要把 `LOGIN_SSO_URL` 配置为 `127.0.0.1` 或 `localhost`，因为它们在 Login 容器中指向 Login 容器自身。
 
 #### Proxy 与 Login 行为配置
 
@@ -249,7 +330,7 @@ CONSOLE_PORT=7004
 
 | 变量 | 模板值/默认值 | 作用 |
 | --- | --- | --- |
-| `SSO_PUBLIC_BASE_URL` | 模板为 localhost | SSO 对 GitHub 可访问的稳定公网 base URL，例如 `https://sso.example.com`；不要附加 `/sso` 或 `/metadata`。 |
+| `SSO_PUBLIC_BASE_URL` | 模板为 `http://sso:7001` | SAML IdP 的稳定 base URL，不要附加 `/sso` 或 `/metadata`；公网和内网模式的具体取值见 6.1.1 节。 |
 | `SSO_CERT_DIR` | `./certs` | 宿主机证书目录；Compose 只读挂载到 SSO 容器 `/certs`。 |
 | `ENTERPRISE_SHORTCODE` | `octo` | 必须改成创建 EMU 时确定的 shortcode，不能无条件沿用示例值。 |
 | `GITHUB_API_BASE_URL` | `https://api.github.com` | SSO 调用 Copilot seat、AI Credits 等 GitHub API 的根地址。 |
@@ -369,8 +450,8 @@ Settings 更新带版本号并使用乐观锁；另一管理员已先保存时 C
 
 | GitHub 字段 | 填写值 |
 | --- | --- |
-| Sign on URL | `https://<sso-public-base-url>/sso` |
-| Issuer | `https://<sso-public-base-url>/metadata` |
+| Sign on URL | `<SSO_PUBLIC_BASE_URL>/sso` |
+| Issuer | `<SSO_PUBLIC_BASE_URL>/metadata` |
 | Public certificate | `certs/idp-cert.pem` 文件内容 |
 
 ![填写 SAML SSO 信息](images/02.5.fill-saml-sso-info.png)
@@ -378,6 +459,7 @@ Settings 更新带版本号并使用乐观锁；另一管理员已先保存时 C
 配置关系必须保持一致：
 
 - `.env` 中 `SSO_PUBLIC_BASE_URL` 对应 GitHub 页面中的 SSO URL 和 Issuer。
+- 公网模式和仅 Docker 内网模式的完整填写示例见 6.1.1 节。
 - `.env` 中 `SP_ENTITY_ID` 对应 GitHub Enterprise SAML SP。
 - `.env` 中 `SP_ACS_URL` 对应 GitHub Enterprise SAML ACS。
 - `sso` 服务读取的证书目录中必须存在 `idp-cert.pem` 和 `idp-key.pem`。
@@ -388,7 +470,7 @@ GitHub 保存配置前通常会提供测试链接。点击测试链接后，如�
 
 如果测试失败，优先检查：
 
-- `SSO_PUBLIC_BASE_URL` 是否为 GitHub 可访问的公网地址。
+- 执行登录的浏览器是否能解析并访问 `SSO_PUBLIC_BASE_URL`；内网模式下应从 Login 容器检查。
 - `Sign on URL` 是否以 `/sso` 结尾。
 - `Issuer` 是否以 `/metadata` 结尾。
 - Public certificate 是否完整复制了 `idp-cert.pem` 内容。
@@ -549,7 +631,7 @@ Copilot seat 必须分配给真实、独立的用户身份。不得为了减少 
 API_KEY=<strong-random-api-key>
 INTERNAL_API_TOKEN=<strong-random-internal-token>
 SESSION_SECRET=<strong-random-session-secret>
-SSO_PUBLIC_BASE_URL=https://<sso-public-base-url>
+SSO_PUBLIC_BASE_URL=http://sso:7001
 SSO_CERT_DIR=./certs
 SP_ENTITY_ID=https://github.com/enterprises/<enterprise-slug>
 SP_ACS_URL=https://github.com/enterprises/<enterprise-slug>/saml/consume
@@ -562,7 +644,7 @@ SSO_DEFAULT_USER_PASSWORD=<strong-bootstrap-password>
 LOGIN_SSO_URL=http://sso:7001/login
 ```
 
-上面的 `LOGIN_SSO_URL` 适用于默认 Compose 网络；如果 Login 单独部署在其他节点，应改为该节点实际可访问的 SSO `/login` URL。`SSO_DEFAULT_USER_PASSWORD` 用于自动创建用户后的首次登录，是多个自动创建用户共享的启动配置；应按高敏感凭据管理。若改为逐用户独立密码，自动流程无法从 hash 反推出密码，需要在 Proxy Accounts 中手动输入实际密码重新授权。
+上面的 `SSO_PUBLIC_BASE_URL` 和 `LOGIN_SSO_URL` 适用于不开放 7001 的默认 Compose 内网模式，GitHub Sign on URL 应填写 `http://sso:7001/sso`，Issuer 应填写 `http://sso:7001/metadata`。如果选择公网模式或 Login 单独部署在其他节点，应按照 6.1.1 节同时修改这四处地址。`SSO_DEFAULT_USER_PASSWORD` 用于自动创建用户后的首次登录，是多个自动创建用户共享的启动配置；应按高敏感凭据管理。若改为逐用户独立密码，自动流程无法从 hash 反推出密码，需要在 Proxy Accounts 中手动输入实际密码重新授权。
 
 启动服务：
 
@@ -898,11 +980,11 @@ curl http://localhost:3000/responses \
 
 不要把 `INTERNAL_API_TOKEN` 暴露给最终用户。
 
-### 14.3 证书与公网地址
+### 14.3 证书与 SSO 地址
 
-`sso` 的公网地址和证书配置必须稳定：
+`sso` 的访问地址和证书配置必须稳定：
 
-- GitHub Enterprise SAML 配置指向的 URL 必须能从 GitHub 访问。
+- GitHub Enterprise SAML 配置指向的 URL 必须能从执行登录的浏览器访问。
 - `SSO_PUBLIC_BASE_URL` 变化后，GitHub SAML 配置也要同步更新。
 - 证书变化后，GitHub 页面中的 Public certificate 也要同步更新。
 - `idp-key.pem` 泄露时，应重新生成证书并更新 GitHub 配置。
@@ -922,7 +1004,7 @@ curl http://localhost:3000/responses \
 
 | 问题 | 可能原因 | 排查方式 |
 | --- | --- | --- |
-| SAML 测试失败 | SSO 公网地址不可达；Issuer 错误；证书不匹配；ACS 配置不一致 | 检查 `SSO_PUBLIC_BASE_URL`、GitHub Sign on URL、Issuer、Public certificate、`SP_ENTITY_ID`、`SP_ACS_URL`。 |
+| SAML 测试失败 | 登录浏览器无法访问 SSO；Issuer 错误；证书不匹配；ACS 配置不一致 | 检查 `SSO_PUBLIC_BASE_URL`、GitHub Sign on URL、Issuer、Public certificate、`SP_ENTITY_ID`、`SP_ACS_URL`；内网模式还需确认 Login 与 SSO 位于同一 Docker 网络。 |
 | SCIM 同步失败 | SCIM token 无效；Open SCIM Configuration 未启用；Enterprise slug 错误 | 检查 `SCIM_BASE_URL`、`SCIM_TOKEN`、GitHub SCIM 配置页面和 SSO Users 错误详情。 |
 | Copilot seat 分配失败 | PAT 为空或权限不足；Copilot 未开通；用户未同步到 EMU | 检查 `GITHUB_COPILOT_SEAT_PAT`、GitHub Copilot 开通状态、用户 `ghLogin` 和 seat 错误详情。 |
 | AI Credits 刷新失败 | PAT 没有 billing usage 权限；Enterprise billing 未激活 | 检查 PAT 权限、Billing 状态、AI Credits Usage 页面错误。 |
@@ -942,7 +1024,7 @@ curl http://localhost:3000/responses \
 
 1. GitHub Enterprise EMU 创建完成，可以使用 `admin_<shortcode>` 登录。
 2. GitHub Enterprise 已生成 SCIM token，并写入 `.env`。
-3. `sso` 的 `/metadata` 和 `/sso` 可被 GitHub 访问。
+3. `sso` 的 `/metadata` 和 `/sso` 可被执行登录的浏览器访问；内网模式下应由 Login 容器访问。
 4. SAML SSO 测试成功，recovery code 已安全保存。
 5. Open SCIM Configuration 已启用。
 6. console 中首个 SSO 管理员已同步到 GitHub，且可用 `<ssoUser>_<shortcode>` 登录。
