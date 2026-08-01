@@ -33,9 +33,13 @@ SSO 模块负责“本地 SSO 用户 ↔ GitHub Enterprise Managed User(EMU)”�
 ### 用户管理
 
 - 创建、查询、分页搜索、修改本地 SSO 用户。
-- `ensure` 根据 `identity` / `preferredSsoUser` 生成或复用 `ssoUser`；新用户默认密码为 `ssoUser`，email 为 `<ssoUser>@SSO_EMAIL_DOMAIN`。
-- CSV 导入支持 `ssoUser` 或 `ssoUser,password`；已存在用户会更新密码。
+- `ensure` 根据 `identity` / `preferredSsoUser` 生成或复用 `ssoUser`；新用户使用 `SSO_DEFAULT_USER_PASSWORD`，未配置时使用 `ssoUser`。
+- CSV 导入支持 `ssoUser` 或 `ssoUser,password`；省略密码时只为新用户应用默认密码，已有用户保持不变。
 - 删除本地 SSO 用户当前只通过 batch 的 `delete_sso` 操作提供。
+
+#### 密码修改与 Login
+
+SSO 数据库只保存 scrypt 密码哈希和 salt，不能还原用户的明文密码。`POST /users/ensure` 处理已有用户时，只会依次验证当前 `SSO_DEFAULT_USER_PASSWORD` 和该用户的 `ssoUser`；匹配时才返回 `passwordForLogin`。因此，通过 Console、`PATCH /users/:ssoUser` 或 CSV 导入将密码修改为其他值后，SSO 仍可使用新密码完成 SAML 登录，但不能把该密码自动提供给 Login，未知 identity 的自动初始化会因缺少密码而失败。管理员需要在 Console 的 **Reauthorize Copilot OAuth** 中重新输入新密码。
 
 ### SCIM / EMU
 
@@ -43,7 +47,7 @@ SSO 模块负责“本地 SSO 用户 ↔ GitHub Enterprise Managed User(EMU)”�
 - enterprise role 可由请求显式传入；未传时本地 `role=admin` 映射为 `enterprise_owner`，其他映射为 `user`。
 - `suspend_emu`：PATCH SCIM user 的 `active=false`，并标记 `emuStatus=suspended`。
 - `delete_emu`：移除 Copilot seat、删除 SCIM user，并将本地 EMU 信息重置为 `not_synced`。
-- 反向导入：从 SCIM 拉取用户生成 preview plan，可 apply 到本地 SQLite。
+- 反向导入：从 SCIM 拉取用户并分页读取 Enterprise Copilot seats 生成 preview plan，apply 时同步本地身份映射和 `copilot_seat_status`。
 - SCIM 请求支持节流和对 `429`、`5xx`、带 `retry-after` 的 `403` 重试。
 
 ### Copilot seats 与 AI Credits
@@ -86,7 +90,7 @@ npm --workspace @ghcp/sso run typecheck
 npm --workspace @ghcp/sso run build
 ```
 
-当前 `@ghcp/sso` 只提供 `start`、`typecheck`、`build` 三个脚本；未提供测试脚本，也未提供从 `dist` 启动的 package script。
+`@ghcp/sso` 提供 `start`、`start:prod`、`typecheck`、`build` 和 `test` 脚本。
 
 ### Docker
 
@@ -97,7 +101,7 @@ docker build -f src/sso/Dockerfile -t ghcp-sso .
 docker run --rm -p 7001:7001 --env-file src/sso/.env.example ghcp-sso
 ```
 
-真实运行时请替换示例密钥，并挂载/设置 `DB_PATH`、`CERT_DIR` 指向可写数据库目录和证书目录。Dockerfile 当前未提供 `EXPOSE`、`HEALTHCHECK` 或 docker-compose 配置。
+真实运行时请替换示例密钥，并挂载/设置 `DB_PATH`、`CERT_DIR` 指向可写数据库目录和证书目录。Dockerfile 本身未声明 `EXPOSE`/`HEALTHCHECK`；仓库根 `docker-compose.yml` 已配置端口、卷、依赖和健康检查。
 
 ## 4. 配置参数
 
@@ -113,8 +117,7 @@ docker run --rm -p 7001:7001 --env-file src/sso/.env.example ghcp-sso
 | `PROXY_BASE_URL` | `http://localhost:3000` | 删除 SSO 用户并清理 proxy 时必填 | `delete_sso` 时回调 proxy 内部删除接口。 |
 | `MOCK_GITHUB_BASE_URL` | `http://localhost:8002` | 本地/mock 场景 | `SCIM_BASE_URL` 为空时作为 SCIM fallback；`SP_ACS_URL` 为空时作为 mock ACS fallback。 |
 | `SESSION_SECRET` | `dev-secret-change-me` | 真实环境必填 | `cookie-session` 签名密钥。 |
-| `SSO_EMAIL_DOMAIN` | `customsso.com` | 否 | 自动生成 email：`<ssoUser>@domain`。 |
-| `USER_PREFIX` | `user` | 否 | 无法从输入生成用户名时的 fallback。 |
+| `SSO_DEFAULT_USER_PASSWORD` | 未设置 | 否 | 新用户默认密码；未设置时使用 `ssoUser`。只从环境变量读取，不进入 DB 或 Console。 |
 | `SSO_USER_EVENTS_LOG` | `./data/sso-user-events.log` | 否 | 追加写入部分用户事件。 |
 | `ENTERPRISE_SLUG` | `acme` | GitHub/SCIM/Copilot 场景必填 | GitHub Enterprise slug；用于 SCIM fallback、Copilot seat、AI Credits、默认 SP entityID。 |
 | `ENTERPRISE_SHORTCODE` | `octo` | GH login fallback 时必填 | SCIM 响应无 `githubLogin` 时生成 `<normalized>_<shortcode>`；`ensure` 也会剥离该后缀。 |
@@ -122,13 +125,29 @@ docker run --rm -p 7001:7001 --env-file src/sso/.env.example ghcp-sso
 | `GITHUB_COPILOT_SEAT_PAT` | 未设置 | Copilot seat / AI Credits 必填 | Bearer token；代码不在启动时强校验，调用相关功能时校验。 |
 | `SCIM_BASE_URL` | 空字符串 | 真实 SCIM 必填 | GitHub SCIM base URL；为空时使用 `MOCK_GITHUB_BASE_URL/scim/v2/enterprises/{ENTERPRISE_SLUG}`。 |
 | `SCIM_TOKEN` | 空字符串 | SCIM 调用必填 | SCIM Bearer token；代码不在启动时强校验。 |
-| `SCIM_REQUEST_DELAY_MS` | `250` | 否 | SCIM 请求之间的最小间隔。 |
-| `SCIM_MAX_RETRIES` | `3` | 否 | SCIM 可重试错误的最大重试次数。 |
-| `SCIM_RETRY_BASE_DELAY_MS` | `1000` | 否 | 指数退避基础延迟，最大 30 秒。 |
-| `BULK_SYNC_CONCURRENCY` | `3` | 当前未使用 | 配置已读取，但当前 batch 实现是串行循环，未接入并发控制。 |
 | `CERT_DIR` | `../../certs` | SAML 启动必填 | 目录中必须有 `idp-cert.pem`、`idp-key.pem`。`.env.example` 示例为 `../../certs`。 |
 | `SP_ENTITY_ID` | 空字符串 | 真实 GitHub SAML 建议配置 | 为空时 fallback 为 `https://github.com/enterprises/{ENTERPRISE_SLUG}`。 |
 | `SP_ACS_URL` | 空字符串 | 真实 GitHub SAML 必填 | 为空时 fallback 到 mock GitHub ACS。 |
+
+用户上限、用户名 fallback、默认邮箱域、SCIM 限流/重试和 `sync_emu` 并发保存在 `sso_runtime_settings`，通过 Console Settings 页面保存后对下一次操作生效。
+
+### `.env` 与 runtime Settings
+
+环境变量负责端口、内部密钥、服务/GitHub/SCIM 地址、PAT、SAML 证书、SQLite/事件日志路径和默认密码等部署配置，启动时读取，修改后要重启 SSO。Runtime Settings 保存在 `sso.sqlite`，通过 Console **Settings** 或 `GET/PATCH /api/settings/runtime` 管理，无需重启。
+
+| Setting | 默认值 | 合法范围 | 生效语义 |
+| --- | ---: | --- | --- |
+| `maxSsoUsers` | `null` | `null` 或整数 `1..1000000` | 限制 SSO 用户总数；`null` 不限。创建、ensure、CSV 导入和导入计划 apply 都受限，降低上限不会删除现有用户。 |
+| `userPrefix` | `user` | 规范化后必须含字母或数字，最长 32 字符 | identity 不能生成可用用户名或最终碰撞 fallback 时使用；不重命名现有用户。 |
+| `emailDomain` | `customsso.com` | 合法 hostname | 新用户未显式提供 email，以及 EMU 导入缺少主 email 时使用；不修改现有 email。 |
+| `bulkSyncConcurrency` | `3` | 整数 `1..20` | 新 `sync_emu` 批处理的并发；其他批处理保持串行。 |
+| `scimRequestDelayMs` | `250` | 整数 `0..60000` | 当前 SSO 进程内 SCIM 请求之间的最小间隔。 |
+| `scimMaxRetries` | `3` | 整数 `0..10` | 可重试响应/网络错误的最大重试次数；`0` 表示不重试。 |
+| `scimRetryBaseDelayMs` | `1000` | 整数 `0..60000` | SCIM 指数退避基础延迟；响应 `Retry-After` 可决定更长等待。 |
+
+Settings 更新使用 `expectedVersion` 乐观锁；版本落后返回 `409 settings_version_conflict`。首次 migration 使用上表代码默认值，不读取旧 `.env`。`SSO_DEFAULT_USER_PASSWORD` 始终是 env-only：它是敏感启动配置，不会显示或保存到 Settings。
+
+Runtime settings snapshot 当前缓存在进程内；多个 SSO 实例共享同一 SQLite 时，其他实例不会自动收到某一实例保存的设置，需要额外的跨进程失效机制或重启。
 
 ## 5. 接口与 API 边界
 
@@ -155,6 +174,9 @@ docker run --rm -p 7001:7001 --env-file src/sso/.env.example ghcp-sso
 | 方法 | 路径 | 请求核心 | 响应核心 |
 |---|---|---|---|
 | `POST` | `/users/ensure` | `{ identity, preferredSsoUser? }` | `EnsureSsoUserResponse`：`{ user, passwordForLogin?, created }` |
+| `GET` | `/settings/runtime` | 无 | `SsoRuntimeSettingsDto`，包含设置、`version`、`updatedAt`。 |
+| `PATCH` | `/settings/runtime` | `{ expectedVersion, changes }` | 保存 runtime settings；校验失败返回 400，版本冲突返回 409。 |
+| `GET` | `/users/capacity` | 无 | `{ current, limit, remaining, reached }`。 |
 | `GET` | `/users` | query: `q?`, `page?`, `pageSize?`, `sort?`, `dir?` | `PageResponse<SsoUserDto>` |
 | `POST` | `/users` | `{ ssoUser, password?, email?, role? }` | `201 SsoUserDto` |
 | `POST` | `/users/import` | `{ csvText }` | `BatchResult<{ line, ssoUser, status, detail }>` |
@@ -190,9 +212,10 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 | 表 | 主键/索引 | 主要字段 | 作用 |
 |---|---|---|---|
 | `sso_users` | `sso_user` PK | `password_hash`, `salt`, `email`, `role`, `gh_login`, `gh_scim_id`, `emu_status`, `copilot_seat_status`, `copilot_seat_last_operation`, `copilot_seat_last_error`, `copilot_seat_updated_at`, `created_at`, `updated_at` | 本地 SSO 用户和外部身份映射。 |
+| `sso_runtime_settings` | `id=1` | `max_sso_users`, `user_prefix`, `email_domain`, `bulk_sync_concurrency`, SCIM delay/retry 字段、`version`, `updated_at` | 持久化 Console runtime settings 和乐观锁版本。 |
 | `sso_budget_cache` | `period_key` PK | `year`, `month`, `quantity`, `unit_type`, `raw_json`, `fetched_at` | AI Credits 月度用量缓存。 |
 | `sso_emu_import_plans` | `id` PK | `sso_user`, `status`, `created_at`, `updated_at`, `applied_at` | SCIM 反向导入 preview/apply 计划。 |
-| `sso_emu_import_plan_rows` | `(plan_id, row_index)` PK；`(plan_id,status,row_index)` 索引 | `sso_user`, `email`, `gh_login`, `gh_scim_id`, `emu_status`, `status`, `detail`, `password_for_login`, `action` | 导入计划明细。 |
+| `sso_emu_import_plan_rows` | `(plan_id, row_index)` PK；`(plan_id,status,row_index)` 索引 | `sso_user`, `email`, `gh_login`, `gh_scim_id`, `emu_status`, `copilot_seat_status`, `status`, `detail`, `action` | 导入计划明细。 |
 
 当前未配置：`gh_login`、`gh_scim_id` 没有数据库唯一索引；重复绑定主要依赖业务逻辑检查。
 
@@ -201,7 +224,7 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 - `SsoUserRecord`：数据库用户记录，等于 `SsoUserDto` 加上 `passwordHash`、`salt`。
 - `ScimUserResource`：SCIM 用户资源，包含 `id`、`userName`、`externalId`、`emails`、`roles`、`active`、`githubLogin`。
 - `ProvisionResult`：SCIM 同步结果 `{ scimId, ghLogin }`。
-- `ImportEmuPlanDto` / `ImportEmuUserRow`：反向导入计划及行结果。
+- `ImportEmuPlanDto` / `ImportEmuUserRow`：包含 SCIM 身份与 Copilot seat 状态的反向导入计划及行结果。
 - `AiCreditsUsageDto`：上月、本月、预计本月用量、已分配 seat 数、seat 月成本。
 - `BatchResult<T>` / `PageResponse<T>`：共享的批处理和分页响应壳。
 
@@ -228,14 +251,15 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 | `src/routes/samlRoutes.ts` | SAML metadata、SSO、登录、登出 HTML 路由。 |
 | `src/saml/saml.ts` | SAML IdP/SP 配置、证书读取、AuthnRequest 解析、SAMLResponse 构造。 |
 | `src/routes/usersApi.ts` | 用户、batch、EMU import、Copilot seat API 参数校验和响应封装。 |
+| `src/routes/settingsApi.ts` | Runtime settings 读取、校验、乐观锁更新。 |
 | `src/users/service.ts` | 用户生命周期、SCIM 同步、导入计划、batch、proxy 清理的核心业务逻辑。 |
 | `src/users/bulkImport.ts` | 简单 CSV 解析，支持 header、去重和错误收集。 |
 | `src/scim/scimClient.ts` | SCIM create/update/list/suspend/delete、鉴权、重试、节流。 |
 | `src/scim/handle.ts` | 从 `ssoUser` 和 enterprise shortcode 推导 GH login。 |
-| `src/copilot/seats.ts` | GitHub Copilot selected users assign/remove。 |
+| `src/copilot/seats.ts` | GitHub Copilot selected users assign/remove，以及 Enterprise seat 列表分页查询。 |
 | `src/budget/budgetService.ts` | AI Credits usage 查询、缓存和投影计算。 |
 | `src/routes/budgetApi.ts` | AI Credits cache 读取/刷新 API。 |
-| `src/db/*` | SQLite 连接、migration、用户 repo、预算 cache repo、导入计划 repo、事件日志。 |
+| `src/db/*` | SQLite 连接、migration、用户/settings repo、预算 cache repo、导入计划 repo、事件日志。 |
 | `src/auth/*` | 内部 token middleware、scrypt 密码哈希和校验。 |
 | `src/clients/proxyClient.ts` | 删除 SSO 用户时调用 proxy 内部清理接口。 |
 
@@ -245,8 +269,7 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 - 新增内部 API：优先放到现有 `/api` router，默认会经过 `requireInternalToken`；如需新 DTO，同步更新 shared contracts。
 - 新增公开 SAML 行为：从 `routes/samlRoutes.ts` 和 `saml/saml.ts` 开始，注意 cookie session 与证书读取。
 - 修改 SQLite 结构：更新 `db/migrations.ts`，同时更新对应 repo 的 row mapper 和 shared DTO。
-- 调试 SCIM：设置 `LOG_LEVEL=debug`，关注 `SCIM_REQUEST_DELAY_MS`、`SCIM_MAX_RETRIES`、`SCIM_RETRY_BASE_DELAY_MS`。
+- 调试 SCIM：设置 `LOG_LEVEL=debug`，并在 Console Settings 中检查 SCIM delay、max retries 和 retry base delay。
 - 调试 Copilot/AI Credits：确认 `GITHUB_COPILOT_SEAT_PAT`、`GITHUB_API_BASE_URL`、`ENTERPRISE_SLUG`；相关功能调用时才会校验 PAT。
 - 调试 SAML：确认 `BASE_URL`、`SP_ENTITY_ID`、`SP_ACS_URL`、`CERT_DIR`；证书文件缺失会导致服务启动失败。
-- 批量操作当前是串行执行；`BULK_SYNC_CONCURRENCY` 已解析但未接入。
-- 文档/类型检查之外，当前 `@ghcp/sso` 未提供测试脚本。
+- `sync_emu` 批量操作使用 Console Settings 中的并发值，其他破坏性批量操作保持串行。

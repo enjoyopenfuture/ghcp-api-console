@@ -6,6 +6,8 @@
   "scripts": {
     "start": "tsx src/server/index.ts",
     "start:prod": "node dist/server/index.js",
+    "pretest": "npm --workspace @ghcp/shared run build",
+    "test": "tsx --test src/server/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc && vite build"
   },

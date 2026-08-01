@@ -5,6 +5,7 @@ import { getDb } from './db/connection.js';
 import { recoverInterruptedTasks } from './db/tasksRepo.js';
 import { requireInternalToken } from './auth/internalAuth.js';
 import { tasksApiRouter } from './routes/tasksApi.js';
+import { settingsApiRouter } from './routes/settingsApi.js';
 
 export function buildApp(): express.Express {
   const app = express();
@@ -12,7 +13,7 @@ export function buildApp(): express.Express {
   app.get('/healthz', (_req, res) => {
     res.json({ status: 'ok', service: 'login' });
   });
-  app.use('/api', requireInternalToken, tasksApiRouter);
+  app.use('/api', requireInternalToken, tasksApiRouter, settingsApiRouter);
   app.use((_req, res) => {
     res.status(404).json(apiError('not_found', 'Login route is not implemented yet.'));
   });

@@ -1,4 +1,4 @@
-import type { CopilotSeatStatus, CopilotTokenStatus, EmuStatus, GhTokenStatus, LoginTaskStatus } from '@ghcp/shared';
+import type { CopilotOauthStatus, CopilotSeatStatus, EmuStatus, LoginTaskStatus } from '@ghcp/shared';
 
 export function formatDate(value?: string): string {
   if (!value) return '-';
@@ -15,7 +15,7 @@ export function tokenTotal(input?: number, output?: number, cache?: number): num
   return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : undefined;
 }
 
-export function statusTone(status?: GhTokenStatus | CopilotTokenStatus | CopilotSeatStatus | EmuStatus | LoginTaskStatus | string): 'default' | 'success' | 'warning' | 'danger' | 'info' | 'muted' {
+export function statusTone(status?: CopilotOauthStatus | CopilotSeatStatus | EmuStatus | LoginTaskStatus | string): 'default' | 'success' | 'warning' | 'danger' | 'info' | 'muted' {
   switch (status) {
     case 'valid':
     case 'active':

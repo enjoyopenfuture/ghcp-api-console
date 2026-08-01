@@ -7,6 +7,7 @@ import { requireInternalToken } from './auth/internalAuth.js';
 import { usersApiRouter } from './routes/usersApi.js';
 import { budgetApiRouter } from './routes/budgetApi.js';
 import { samlRouter } from './routes/samlRoutes.js';
+import { settingsApiRouter } from './routes/settingsApi.js';
 
 export function buildApp(): express.Express {
   const app = express();
@@ -17,7 +18,7 @@ export function buildApp(): express.Express {
     res.json({ status: 'ok', service: 'sso' });
   });
   app.use(samlRouter);
-  app.use('/api', requireInternalToken, usersApiRouter, budgetApiRouter);
+  app.use('/api', requireInternalToken, settingsApiRouter, usersApiRouter, budgetApiRouter);
   app.use((_req, res) => {
     res.status(404).json(apiError('not_found', 'SSO route is not implemented yet.'));
   });

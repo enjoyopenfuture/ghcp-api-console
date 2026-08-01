@@ -1,4 +1,4 @@
-import type { AiCreditsUsageDto, BatchResult, CreateImportEmuPlanRequest, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUsersRequest, ImportEmuUserStatus, PageResponse, SsoUserBatchRequest, SsoUserBatchRow, SsoUserDto } from '@ghcp/shared';
+import type { AiCreditsUsageDto, BatchResult, CreateImportEmuPlanRequest, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUsersRequest, ImportEmuUserStatus, PageResponse, SsoRuntimeSettingsDto, SsoUserBatchRequest, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto, UpdateSsoRuntimeSettingsRequest } from '@ghcp/shared';
 import { api } from './client.js';
 
 export interface ListUsersQuery {
@@ -16,6 +16,18 @@ export function listSsoUsers(params: ListUsersQuery = {}): Promise<PageResponse<
   }
   const query = search.toString();
   return api<PageResponse<SsoUserDto>>(`/api/console/sso/users${query ? `?${query}` : ''}`);
+}
+
+export function getSsoUserCapacity(): Promise<SsoUserCapacityDto> {
+  return api<SsoUserCapacityDto>('/api/console/sso/users/capacity');
+}
+
+export function getSsoRuntimeSettings(): Promise<SsoRuntimeSettingsDto> {
+  return api<SsoRuntimeSettingsDto>('/api/console/sso/settings/runtime');
+}
+
+export function updateSsoRuntimeSettings(body: UpdateSsoRuntimeSettingsRequest): Promise<SsoRuntimeSettingsDto> {
+  return api<SsoRuntimeSettingsDto>('/api/console/sso/settings/runtime', { method: 'PATCH', body: JSON.stringify(body) });
 }
 
 export function createSsoUser(body: { ssoUser: string; password?: string; email?: string; role?: 'user' | 'admin' }): Promise<SsoUserDto> {

@@ -1,7 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
+import {
+  DiagnosticBodyCapture,
+  recordFetchFailure,
+  recordHttpFailure,
+  recordStreamFailure,
+  type CapturedResponseBody,
+  type ErrorDiagnosticContext,
+  type PreparedUpstreamRequest,
+} from '../diagnostics/errorDiagnostics.js';
 import { Logger } from '../logger.js';
-import type { CopilotTokenData } from './copilotToken.js';
+import type { CopilotAuthContext } from './copilotAuth.js';
 
 export const COPILOT_API_PATHS = ['/chat/completions', '/v1/messages', '/responses'] as const;
 export const COPILOT_FORWARD_PATHS = ['/chat/completions', '/v1/messages', '/v1/messages/count_tokens', '/responses'] as const;
@@ -34,6 +43,15 @@ export interface ForwardCopilotRequestOptions {
   interactionType?: string;
 }
 
+export interface ListModelsOptions {
+  useCache?: boolean;
+  diagnostics?: ErrorDiagnosticContext;
+}
+
+export interface PreparedCopilotRequest extends PreparedUpstreamRequest {
+  readonly method: 'GET' | 'POST';
+}
+
 export class CopilotApiError extends Error {
   constructor(
     message: string,
@@ -54,49 +72,90 @@ export class CopilotModelPathError extends Error {
 }
 
 const MODELS_CACHE_TTL_MS = 60 * 60 * 1000;
-const MODELS_CACHE_REFRESH_AHEAD_MS = 5 * 60 * 1000;
 const MODELS_CACHE_STALE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const MODELS_CACHE_NEGATIVE_RECHECK_MS = 60 * 1000;
 const modelsCache = new Map<ModelsCacheKey, ModelsCacheEntry>();
 const modelsCacheLogger = new Logger('models-cache');
 
-export async function listModels(copilot: CopilotTokenData): Promise<ModelInfo[]> {
-  const snapshot = await getModelsSnapshot(copilot);
+export async function listModels(copilot: CopilotAuthContext, options: ListModelsOptions = {}): Promise<ModelInfo[]> {
+  const useCache = options.useCache !== false;
+  const snapshot = await getModelsSnapshot(copilot, {
+    forceRefresh: !useCache,
+    allowStaleOnError: useCache,
+    diagnostics: options.diagnostics,
+  });
   return snapshot.models;
 }
 
-async function fetchModels(copilot: CopilotTokenData): Promise<ModelInfo[]> {
-  const res = await fetch(copilotUrl(copilot, '/models'), { headers: copilotHeaders(copilot) });
-  if (!res.ok) throw new CopilotApiError(`List models failed: ${res.status} ${await res.text()}`, res.status);
-  const data = (await res.json()) as { data?: ModelInfo[] };
-  return data.data ?? [];
+async function fetchModels(copilot: CopilotAuthContext, diagnostics?: ErrorDiagnosticContext): Promise<ModelInfo[]> {
+  const request: PreparedCopilotRequest = Object.freeze({
+    url: copilotUrl(copilot, '/models'),
+    method: 'GET',
+    headers: Object.freeze(modelHeaders(copilot)),
+  });
+  const res = await executeWithDiagnostics(request, diagnostics);
+  const body = await readWithDiagnostics(request, res, diagnostics);
+  if (!res.ok) {
+    if (diagnostics) await recordHttpFailure(diagnostics, request, res, body.capture);
+    throw new CopilotApiError(`List models failed with HTTP ${res.status}.`, res.status);
+  }
+  const data = JSON.parse(body.buffer.toString('utf8')) as { data?: ModelInfo[] };
+  if (!Array.isArray(data.data)) throw new CopilotApiError('List models returned an invalid response.', 502);
+  return data.data;
+}
+
+export async function validateCopilotOauthToken(identity: string, accessToken: string): Promise<void> {
+  await fetchModels({ identity, accessToken, api: config.copilotApiBaseUrl });
+}
+
+export function clearModelsCache(identity: string): void {
+  modelsCache.delete(identity);
 }
 
 export async function forwardCopilotRequest(
-  copilot: CopilotTokenData,
+  copilot: CopilotAuthContext,
   path: CopilotApiPath,
   body: Record<string, unknown>,
   options: ForwardCopilotRequestOptions = {},
 ): Promise<Response> {
-  return fetch(copilotUrl(copilot, path), {
+  return executePreparedCopilotRequest(prepareCopilotRequest(copilot, path, body, options));
+}
+
+export function prepareCopilotRequest(
+  copilot: CopilotAuthContext,
+  path: CopilotApiPath,
+  body: Record<string, unknown>,
+  options: ForwardCopilotRequestOptions = {},
+): PreparedCopilotRequest {
+  return Object.freeze({
+    url: copilotUrl(copilot, path),
     method: 'POST',
-    headers: copilotHeaders(copilot, body.stream === true, options),
+    headers: Object.freeze(copilotHeaders(copilot, body.stream === true, options)),
     body: JSON.stringify(body),
   });
 }
 
+export function executePreparedCopilotRequest(request: PreparedCopilotRequest): Promise<Response> {
+  return fetch(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+  });
+}
+
 export async function assertModelSupportsPath(
-  copilot: CopilotTokenData,
+  copilot: CopilotAuthContext,
   path: CopilotApiPath,
   model: string,
+  diagnostics?: ErrorDiagnosticContext,
 ): Promise<void> {
   const capabilityPath = modelCapabilityPath(path);
-  let snapshot = await getModelsSnapshot(copilot);
+  let snapshot = await getModelsSnapshot(copilot, { diagnostics });
   let supportedPaths = snapshot.pathMap.get(model);
   if (supportedPaths?.includes(capabilityPath)) return;
 
   if (Date.now() - snapshot.fetchedAt > MODELS_CACHE_NEGATIVE_RECHECK_MS) {
-    snapshot = await getModelsSnapshot(copilot, { forceRefresh: true, allowStaleOnError: false });
+    snapshot = await getModelsSnapshot(copilot, { forceRefresh: true, allowStaleOnError: false, diagnostics });
     supportedPaths = snapshot.pathMap.get(model);
     if (supportedPaths?.includes(capabilityPath)) return;
   }
@@ -109,21 +168,19 @@ export function modelSupportsPath(model: ModelInfo, path: CopilotApiPath): boole
 }
 
 async function getModelsSnapshot(
-  copilot: CopilotTokenData,
-  options: { forceRefresh?: boolean; allowStaleOnError?: boolean } = {},
+  copilot: CopilotAuthContext,
+  options: { forceRefresh?: boolean; allowStaleOnError?: boolean; diagnostics?: ErrorDiagnosticContext } = {},
 ): Promise<ModelsSnapshot> {
   const cacheKey = modelsCacheKey(copilot);
   const entry = modelsCacheEntry(cacheKey);
   const now = Date.now();
   const snapshot = entry.snapshot;
-  if (!options.forceRefresh && snapshot && snapshot.expiresAt > now) {
-    if (snapshot.expiresAt - now <= MODELS_CACHE_REFRESH_AHEAD_MS) refreshModelsInBackground(cacheKey, copilot, entry);
-    return snapshot;
-  }
+  if (!options.forceRefresh && snapshot && snapshot.expiresAt > now) return snapshot;
 
   try {
-    return await refreshModelsSnapshot(cacheKey, copilot, entry);
+    return await refreshModelsSnapshot(cacheKey, copilot, entry, options.diagnostics);
   } catch (err) {
+    if (err instanceof CopilotApiError && (err.status === 401 || err.status === 403)) throw err;
     if (options.allowStaleOnError !== false && snapshot && now - snapshot.fetchedAt <= MODELS_CACHE_STALE_MAX_AGE_MS) {
       modelsCacheLogger.warn('refresh-failed-stale', 'Using stale Copilot models cache after refresh failed', {
         cacheKey,
@@ -144,24 +201,15 @@ function modelsCacheEntry(cacheKey: ModelsCacheKey): ModelsCacheEntry {
   return created;
 }
 
-function refreshModelsInBackground(cacheKey: ModelsCacheKey, copilot: CopilotTokenData, entry: ModelsCacheEntry): void {
-  if (entry.refreshPromise) return;
-  void refreshModelsSnapshot(cacheKey, copilot, entry).catch((err: unknown) => {
-    modelsCacheLogger.warn('background-refresh-failed', 'Copilot models cache background refresh failed', {
-      cacheKey,
-      error: errorMessage(err),
-    });
-  });
-}
-
 function refreshModelsSnapshot(
   cacheKey: ModelsCacheKey,
-  copilot: CopilotTokenData,
+  copilot: CopilotAuthContext,
   entry: ModelsCacheEntry,
+  diagnostics?: ErrorDiagnosticContext,
 ): Promise<ModelsSnapshot> {
   if (entry.refreshPromise) return entry.refreshPromise;
 
-  const promise = fetchModels(copilot)
+  const promise = fetchModels(copilot, diagnostics)
     .then((models) => {
       const now = Date.now();
       const snapshot: ModelsSnapshot = {
@@ -202,77 +250,93 @@ function modelPathError(model: string, path: CopilotApiPath, supportedPaths: Cop
   return new CopilotModelPathError(`Model "${model}" is not available on ${path}. Supported path(s): ${supportedPaths.join(', ')}.`);
 }
 
-function modelsCacheKey(copilot: CopilotTokenData): ModelsCacheKey {
-  const fields = copilotTokenFields(copilot.token);
-  const fromSku = accountTypeFromText(fields.get('sku'));
-  if (fromSku) return fromSku;
-  const fromProxyEndpoint = accountTypeFromText(fields.get('proxy-ep'));
-  if (fromProxyEndpoint) return fromProxyEndpoint;
-  const fromApi = accountTypeFromText(copilot.api);
-  if (fromApi) return fromApi;
-  try {
-    return new URL(copilot.api).host;
-  } catch {
-    return 'default';
-  }
-}
-
-function copilotTokenFields(token: string): Map<string, string> {
-  const fields = new Map<string, string>();
-  for (const part of token.split(';')) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-    const separator = trimmed.indexOf('=');
-    if (separator <= 0) continue;
-    fields.set(trimmed.slice(0, separator).trim().toLowerCase(), trimmed.slice(separator + 1).trim());
-  }
-  return fields;
-}
-
-function accountTypeFromText(value: string | undefined): ModelsCacheKey | undefined {
-  const normalized = value?.toLowerCase();
-  if (!normalized) return undefined;
-  if (normalized.includes('enterprise')) return 'enterprise';
-  if (normalized.includes('business')) return 'business';
-  return undefined;
+function modelsCacheKey(copilot: CopilotAuthContext): ModelsCacheKey {
+  return copilot.identity;
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+async function executeWithDiagnostics(
+  request: PreparedCopilotRequest,
+  diagnostics: ErrorDiagnosticContext | undefined,
+): Promise<Response> {
+  try {
+    return await executePreparedCopilotRequest(request);
+  } catch (err) {
+    if (diagnostics) await recordFetchFailure(diagnostics, request, err);
+    throw err;
+  }
+}
+
+async function readWithDiagnostics(
+  request: PreparedCopilotRequest,
+  response: Response,
+  diagnostics: ErrorDiagnosticContext | undefined,
+): Promise<{ buffer: Buffer; capture: CapturedResponseBody }> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    return {
+      buffer: Buffer.alloc(0),
+      capture: { buffer: Buffer.alloc(0), byteLength: 0, complete: true, truncated: false },
+    };
+  }
+  const capture = new DiagnosticBodyCapture();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      chunks.push(chunk);
+      totalBytes += chunk.byteLength;
+      capture.add(value);
+    }
+  } catch (err) {
+    const partial = capture.result(false);
+    if (diagnostics) await recordStreamFailure(diagnostics, request, response, partial, err);
+    throw err;
+  }
+  return {
+    buffer: Buffer.concat(chunks, totalBytes),
+    capture: capture.result(true),
+  };
+}
+
 function copilotHeaders(
-  copilot: CopilotTokenData,
+  copilot: CopilotAuthContext,
   acceptsStream = false,
   options: ForwardCopilotRequestOptions = {},
 ): Record<string, string> {
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${copilot.token}`,
+    Authorization: `Bearer ${copilot.accessToken}`,
     'Content-Type': 'application/json',
     Accept: acceptsStream ? 'text/event-stream' : 'application/json',
-    'Openai-Intent': 'conversation-panel',
+    'Openai-Intent': 'conversation-edits',
     'X-Request-Id': randomUUID(),
-    ...config.editorHeaders,
+    'User-Agent': config.opencodeUserAgent,
+    'X-GitHub-Api-Version': config.githubApiVersion,
+    'x-initiator': options.initiator ?? 'user',
   };
-  if (options.claudeCodeOptimized) {
-    headers['X-GitHub-Api-Version'] = config.claudeCodeOptimizedEditorHeaders['X-GitHub-Api-Version'];
-    headers['Copilot-Integration-Id'] = config.claudeCodeOptimizedEditorHeaders['Copilot-Integration-Id'];
-    headers['VScode-SessionId'] = config.claudeCodeOptimizedEditorHeaders['VScode-SessionId'];
-    headers['VScode-MachineId'] = config.claudeCodeOptimizedEditorHeaders['VScode-MachineId'];
-    headers['Editor-Device-Id'] = config.claudeCodeOptimizedEditorHeaders['Editor-Device-Id'];
-    headers['Editor-Version'] = config.claudeCodeOptimizedEditorHeaders['Editor-Version'];
-    headers['Editor-Plugin-Version'] = config.claudeCodeOptimizedEditorHeaders['Editor-Plugin-Version'];
-    headers['User-Agent'] = config.claudeCodeOptimizedEditorHeaders['User-Agent'];
-    if (options.anthropicVersion) headers['anthropic-version'] = options.anthropicVersion;
-    if (options.anthropicBeta) headers['anthropic-beta'] = options.anthropicBeta;
-    if (options.visionRequest) headers['Copilot-Vision-Request'] = 'true';
-    if (options.initiator) headers['x-initiator'] = options.initiator;
-    if (options.interactionType) headers['x-interaction-type'] = options.interactionType;
-  }
+  if (options.anthropicVersion) headers['anthropic-version'] = options.anthropicVersion;
+  if (options.anthropicBeta) headers['anthropic-beta'] = options.anthropicBeta;
+  if (options.visionRequest) headers['Copilot-Vision-Request'] = 'true';
+  if (options.interactionType) headers['X-Interaction-Type'] = options.interactionType;
   return headers;
 }
 
-function copilotUrl(copilot: CopilotTokenData, path: string): string {
+function modelHeaders(copilot: CopilotAuthContext): Record<string, string> {
+  return {
+    Authorization: `Bearer ${copilot.accessToken}`,
+    Accept: 'application/json',
+    'User-Agent': config.opencodeUserAgent,
+    'X-GitHub-Api-Version': config.githubApiVersion,
+  };
+}
+
+function copilotUrl(copilot: CopilotAuthContext, path: string): string {
   return `${copilot.api.replace(/\/+$/, '')}${path}`;
 }
 

@@ -27,10 +27,18 @@ export function setupAdmin(username: string, password: string): AdminRecord {
 
 export function verifyAdmin(username: string, password: string): AdminRecord | undefined {
   const admin = readAdmins().find((entry) => entry.enabled && entry.username === username);
-  if (!admin) return undefined;
-  const candidate = scryptSync(password, admin.salt, KEYLEN);
-  const expected = Buffer.from(admin.password_hash, 'hex');
-  return candidate.length === expected.length && timingSafeEqual(candidate, expected) ? admin : undefined;
+  return admin && passwordMatches(admin, password) ? admin : undefined;
+}
+
+export function changeAdminPassword(username: string, currentPassword: string, newPassword: string): boolean {
+  if (!currentPassword || !newPassword) throw new Error('currentPassword and newPassword are required.');
+  const admins = readAdmins();
+  const index = admins.findIndex((entry) => entry.enabled && entry.username === username);
+  const admin = admins[index];
+  if (!admin || !passwordMatches(admin, currentPassword)) return false;
+  admins[index] = makeAdmin(admin.username, newPassword);
+  writeAdmins(admins);
+  return true;
 }
 
 function readAdmins(): AdminRecord[] {
@@ -57,6 +65,12 @@ function makeAdmin(username: string, password: string): AdminRecord {
     role: 'admin',
     enabled: true,
   };
+}
+
+function passwordMatches(admin: AdminRecord, password: string): boolean {
+  const candidate = scryptSync(password, admin.salt, KEYLEN);
+  const expected = Buffer.from(admin.password_hash, 'hex');
+  return candidate.length === expected.length && timingSafeEqual(candidate, expected);
 }
 
 function isAdminRecord(value: unknown): value is AdminRecord {

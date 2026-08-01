@@ -19,16 +19,19 @@ export function serviceProxy(target: 'proxy' | 'sso' | 'login', mountPath: strin
       const upstream = await fetch(url, {
         method: req.method,
         headers: {
-          Accept: 'application/json',
+          Accept: req.get('accept') ?? 'application/json',
           'Content-Type': 'application/json',
           [INTERNAL_AUTH_HEADER]: config.internalApiToken,
         },
         body: req.method === 'GET' || req.method === 'HEAD' ? undefined : JSON.stringify(req.body ?? {}),
       });
-      const text = await upstream.text();
+      const body = Buffer.from(await upstream.arrayBuffer());
       res.status(upstream.status);
-      res.type(upstream.headers.get('content-type') ?? 'application/json');
-      res.send(text);
+      const contentType = upstream.headers.get('content-type');
+      const contentDisposition = upstream.headers.get('content-disposition');
+      if (contentType) res.setHeader('Content-Type', contentType);
+      if (contentDisposition) res.setHeader('Content-Disposition', contentDisposition);
+      res.send(body);
       logger.info('proxy-response', 'Console API request completed', {
         target,
         method: req.method,

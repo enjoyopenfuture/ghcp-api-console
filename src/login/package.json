@@ -8,6 +8,8 @@
     "start:prod": "node dist/index.js",
     "login": "tsx src/debugToken.ts",
     "login:token": "tsx src/debugToken.ts",
+    "login:copilot-oauth": "tsx src/debugToken.ts",
+    "test": "tsx --test src/auth/*.test.ts src/db/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },

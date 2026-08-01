@@ -1,5 +1,4 @@
-export type GhTokenStatus = 'valid' | 'expired' | 'missing' | 'refreshing' | 'failed';
-export type CopilotTokenStatus = 'valid' | 'expired' | 'missing' | 'refreshing' | 'failed';
+export type CopilotOauthStatus = 'valid' | 'expired' | 'missing' | 'refreshing' | 'failed';
 export type EmuStatus = 'active' | 'suspended' | 'deleted' | 'not_synced';
 export type CopilotSeatStatus = 'unknown' | 'assigned' | 'unassigned' | 'assign_failed' | 'remove_failed';
 export type CopilotSeatOperation = 'assign' | 'remove';
@@ -16,24 +15,27 @@ export interface ProxyAccountDto {
   identity: string;
   ssoUser: string;
   ghLogin?: string;
-  ghTokenStatus: GhTokenStatus;
-  ghTokenUpdatedAt?: string;
-  copilotTokenStatus: CopilotTokenStatus;
-  copilotTokenExpiresAt?: string;
+  copilotOauthStatus: CopilotOauthStatus;
+  copilotOauthUpdatedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface ImportGithubTokensRequest {
+export interface DeleteProxyAccountResult {
+  identity: string;
+  deletedRequestStats: number;
+}
+
+export interface ImportCopilotOauthTokensRequest {
   csvText: string;
 }
 
-export type ImportGithubTokenRowStatus = 'success' | 'failed';
+export type ImportCopilotOauthTokenRowStatus = 'success' | 'failed';
 
-export interface ImportGithubTokenRow {
+export interface ImportCopilotOauthTokenRow {
   line: number;
   name: string;
-  status: ImportGithubTokenRowStatus;
+  status: ImportCopilotOauthTokenRowStatus;
   detail: string;
   account?: ProxyAccountDto;
 }
@@ -52,6 +54,93 @@ export interface ProxyRequestStatDto {
   cacheTokens?: number;
   cacheInputTokens?: number;
   cacheWriteTokens?: number;
+}
+
+export type ProxyErrorDiagnosticFailureKind = 'http' | 'fetch' | 'stream';
+
+export interface HttpHeaderPair {
+  name: string;
+  value: string;
+}
+
+export interface ProxyErrorDiagnosticBodyDto {
+  encoding: 'base64' | 'utf8' | 'unavailable';
+  data?: string;
+  byteLength: number;
+  capturedByteLength: number;
+  truncated: boolean;
+  complete: boolean;
+  unavailableReason?: string;
+}
+
+export interface ProxyErrorDiagnosticRequestDto {
+  method: string;
+  url: string;
+  headers: HttpHeaderPair[];
+  body?: ProxyErrorDiagnosticBodyDto;
+}
+
+export interface ProxyErrorDiagnosticResponseDto {
+  status: number;
+  statusText: string;
+  headers: HttpHeaderPair[];
+  body?: ProxyErrorDiagnosticBodyDto;
+}
+
+export interface ProxyErrorDiagnosticThrownErrorDto {
+  name: string;
+  message: string;
+  stack?: string;
+  cause?: string;
+}
+
+export interface ProxyErrorDiagnosticRecordDto {
+  id: string;
+  timestamp: string;
+  failureKind: ProxyErrorDiagnosticFailureKind;
+  identity: string;
+  path: ProxyRequestStatDto['path'];
+  model?: string;
+  redacted: boolean;
+  inboundRequest: ProxyErrorDiagnosticRequestDto;
+  upstreamRequest: ProxyErrorDiagnosticRequestDto;
+  upstreamResponse?: ProxyErrorDiagnosticResponseDto;
+  error?: ProxyErrorDiagnosticThrownErrorDto;
+}
+
+export interface ProxyErrorDiagnosticSummaryDto {
+  id: string;
+  timestamp: string;
+  failureKind: ProxyErrorDiagnosticFailureKind;
+  identity: string;
+  path: ProxyRequestStatDto['path'];
+  model?: string;
+  status?: number;
+  redacted: boolean;
+  inboundRequestBodyBytes: number;
+  upstreamRequestBodyBytes: number;
+  upstreamResponseBodyBytes: number;
+}
+
+export interface ProxyErrorDiagnosticDetailDto extends ProxyErrorDiagnosticSummaryDto {
+  content: string;
+}
+
+export interface ProxyErrorDiagnosticsListResponse {
+  enabled: boolean;
+  redacted: boolean;
+  items: ProxyErrorDiagnosticSummaryDto[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface ClearProxyErrorDiagnosticsRequest {
+  confirm: true;
+}
+
+export interface ClearProxyErrorDiagnosticsResponse {
+  cleared: true;
 }
 
 export interface SsoUserDto {
@@ -80,6 +169,50 @@ export interface EnsureSsoUserResponse {
   created: boolean;
 }
 
+export interface SsoUserCapacityDto {
+  current: number;
+  limit: number | null;
+  remaining: number | null;
+  reached: boolean;
+}
+
+export interface SsoRuntimeSettingsValues {
+  maxSsoUsers: number | null;
+  userPrefix: string;
+  emailDomain: string;
+  bulkSyncConcurrency: number;
+  scimRequestDelayMs: number;
+  scimMaxRetries: number;
+  scimRetryBaseDelayMs: number;
+}
+
+export interface SsoRuntimeSettingsDto extends SsoRuntimeSettingsValues {
+  version: number;
+  updatedAt: string;
+}
+
+export interface UpdateSsoRuntimeSettingsRequest {
+  expectedVersion: number;
+  changes: Partial<SsoRuntimeSettingsValues>;
+}
+
+export interface LoginRuntimeSettingsValues {
+  concurrency: number;
+  authTimeoutMs: number;
+  authDebugLogs: boolean;
+  authDebugArtifacts: boolean;
+}
+
+export interface LoginRuntimeSettingsDto extends LoginRuntimeSettingsValues {
+  version: number;
+  updatedAt: string;
+}
+
+export interface UpdateLoginRuntimeSettingsRequest {
+  expectedVersion: number;
+  changes: Partial<LoginRuntimeSettingsValues>;
+}
+
 export type SsoUserBatchOperation = 'sync_emu' | 'suspend_emu' | 'delete_emu' | 'delete_sso' | 'assign_copilot' | 'remove_copilot';
 export type SsoUserBatchRowStatus = 'success' | 'failed';
 
@@ -93,6 +226,7 @@ export interface SsoUserBatchRow {
   ssoUser: string;
   status: SsoUserBatchRowStatus;
   detail: string;
+  warning?: string;
   user?: SsoUserDto;
 }
 
@@ -115,9 +249,9 @@ export interface ImportEmuUserRow {
   ghLogin?: string;
   ghScimId?: string;
   emuStatus?: EmuStatus;
+  copilotSeatStatus?: 'assigned' | 'unassigned';
   status: ImportEmuUserStatus;
   detail: string;
-  passwordForLogin?: string;
 }
 
 export interface ImportEmuPlanSummary {
@@ -166,6 +300,7 @@ export interface CreateLoginTaskRequest {
   ssoUser: string;
   ssoPassword: string;
   ghLogin: string;
+  oauthAttemptId: string;
   ssoType: SsoType;
   ssoUrl?: string;
   accountType?: AccountType;
@@ -177,6 +312,7 @@ export interface LoginTaskDto {
   identity: string;
   ssoUser: string;
   ghLogin?: string;
+  oauthAttemptId?: string;
   ssoType: SsoType;
   status: LoginTaskStatus;
   attempts: number;

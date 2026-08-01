@@ -1,17 +1,23 @@
-import express, { type Request, type Response } from 'express';
+import express, { type NextFunction, type Request, type Response } from 'express';
+import { shouldRedact } from '@ghcp/shared';
 import { config } from './config.js';
 import { getDb } from './db/connection.js';
 import { pruneAllRequestStats } from './db/requestStatsRepo.js';
 import { requireApiKey } from './auth/apiKey.js';
 import { requireIdentityHeader } from './auth/identityHeader.js';
 import { requireInternalToken } from './auth/internalAuth.js';
+import { Logger } from './logger.js';
 import { compatibleRouter } from './routes/compatible.js';
 import { resolveClaudeCodeOptimized } from './routes/claudeCodeMode.js';
 import { adminApiRouter } from './routes/adminApi.js';
 import { internalApiRouter } from './routes/internalApi.js';
 
+const requestLogger = new Logger('request');
+
 export function buildApp(): express.Express {
   const app = express();
+  app.use(logRequestHeaders);
+  app.use(captureRawRequestBody);
   app.use(express.json({ limit: '20mb' }));
   app.get('/healthz', (_req, res) => {
     res.json({ status: 'ok', service: 'proxy' });
@@ -35,6 +41,43 @@ export function buildApp(): express.Express {
     res.status(404).json({ error: { message, type: 'invalid_request_error' } });
   });
   return app;
+}
+
+export function captureRawRequestBody(req: Request, _res: Response, next: NextFunction): void {
+  const chunks: Buffer[] = [];
+  let byteLength = 0;
+  req.on('data', (chunk: Buffer | Uint8Array | string) => {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    chunks.push(Buffer.from(buffer));
+    byteLength += buffer.byteLength;
+  });
+  req.on('end', () => {
+    req.rawBody = Buffer.concat(chunks, byteLength);
+  });
+  next();
+}
+
+function logRequestHeaders(req: Request, _res: Response, next: NextFunction): void {
+  requestLogger.debug('request-headers', 'Received proxy request headers', {
+    method: req.method,
+    path: req.originalUrl,
+    identityHeader: config.identityHeader,
+    rawHeaders: redactRawHeaders(req.rawHeaders),
+  });
+  next();
+}
+
+function redactRawHeaders(rawHeaders: string[]): string[] {
+  return rawHeaders.map((value, index) => {
+    if (index % 2 === 0) return value;
+    const headerName = rawHeaders[index - 1] ?? '';
+    return shouldRedactHeader(headerName) ? '<redacted>' : value;
+  });
+}
+
+function shouldRedactHeader(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return shouldRedact(normalized) || normalized === 'x-api-key' || normalized === 'api-key' || normalized === 'apikey';
 }
 
 function supportedPathsMessage(claudeCodeOptimized: boolean): string {

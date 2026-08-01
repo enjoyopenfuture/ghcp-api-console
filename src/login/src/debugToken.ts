@@ -1,5 +1,6 @@
 import type { SsoType } from '@ghcp/shared';
-import { config } from './config.js';
+import { config, type RuntimeAuthConfig } from './config.js';
+import { loginRuntimeSettings } from './db/runtimeSettingsRepo.js';
 import { HeadlessPlaywrightAuthStrategy } from './auth/HeadlessPlaywrightAuthStrategy.js';
 import { loginWithDeviceFlow } from './auth/deviceFlow.js';
 import { AccountLogger } from './tasks/accountLogger.js';
@@ -17,13 +18,16 @@ interface DebugLoginOptions {
 
 async function main(): Promise<void> {
   const options = readOptions(process.argv.slice(2));
-  const logger = AccountLogger.create(config.logDir, options.ssoUser, options.debugLogs ?? config.auth.debugLogs);
-  const authConfig = {
+  const runtimeSettings = loginRuntimeSettings.getSnapshot();
+  const debugLogs = options.debugLogs ?? runtimeSettings.authDebugLogs;
+  const logger = AccountLogger.create(config.logDir, options.ssoUser, debugLogs);
+  const authConfig: RuntimeAuthConfig = {
     ...config.auth,
     ssoUrl: options.ssoUrl ?? config.auth.ssoUrl,
     ssoProvider: options.ssoType === 'azure' ? 'azure' as const : 'custom' as const,
-    debugLogs: options.debugLogs ?? config.auth.debugLogs,
-    debugArtifacts: options.debugArtifacts ?? config.auth.debugArtifacts,
+    timeoutMs: runtimeSettings.authTimeoutMs,
+    debugLogs,
+    debugArtifacts: options.debugArtifacts ?? runtimeSettings.authDebugArtifacts,
     headless: options.headless ?? config.auth.headless,
   };
 
@@ -43,7 +47,7 @@ async function main(): Promise<void> {
     logger,
   );
 
-  console.error('[login-token] login succeeded; raw GitHub token follows on stdout');
+  console.error('[login-token] login succeeded; raw Copilot OAuth token follows on stdout');
   console.log(token);
 }
 
@@ -157,7 +161,7 @@ Debug flags:
   --debug-logs       Enable verbose account log.
   --debug-artifacts  Save Playwright traces/screenshots on failure.
 
-The command prints only the raw GitHub token to stdout. Progress and log path go to stderr.`;
+The command prints only the raw Copilot OAuth token to stdout. Progress and log path go to stderr.`;
 }
 
 main().catch((err: unknown) => {

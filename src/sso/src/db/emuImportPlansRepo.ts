@@ -26,9 +26,9 @@ interface RowRecord {
   gh_login?: string;
   gh_scim_id?: string;
   emu_status?: ImportEmuUserRow['emuStatus'];
+  copilot_seat_status?: ImportEmuUserRow['copilotSeatStatus'];
   status: ImportEmuUserStatus;
   detail: string;
-  password_for_login?: string;
   action?: EmuImportAction;
 }
 
@@ -40,7 +40,8 @@ export function createEmuImportPlanRecord(input: { id: string; ssoUser?: string;
       .run(input.id, input.ssoUser, 'planned', now, now);
     const insertRow = getDb().prepare(`
       INSERT INTO sso_emu_import_plan_rows (
-        plan_id, row_index, sso_user, email, gh_login, gh_scim_id, emu_status, status, detail, password_for_login, action, created_at, updated_at
+        plan_id, row_index, sso_user, email, gh_login, gh_scim_id, emu_status, copilot_seat_status,
+        status, detail, action, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     input.rows.forEach((row, index) => {
@@ -52,9 +53,9 @@ export function createEmuImportPlanRecord(input: { id: string; ssoUser?: string;
         row.ghLogin,
         row.ghScimId,
         row.emuStatus,
+        row.copilotSeatStatus,
         row.status,
         row.detail,
-        row.passwordForLogin,
         row.action,
         now,
         now,
@@ -99,7 +100,8 @@ export function updateEmuImportPlanRow(planId: string, row: EmuImportPlanRowReco
   getDb()
     .prepare(`
       UPDATE sso_emu_import_plan_rows
-      SET email = ?, gh_login = ?, gh_scim_id = ?, emu_status = ?, status = ?, detail = ?, password_for_login = ?, action = ?, updated_at = ?
+      SET email = ?, gh_login = ?, gh_scim_id = ?, emu_status = ?, copilot_seat_status = ?,
+          status = ?, detail = ?, action = ?, updated_at = ?
       WHERE plan_id = ? AND row_index = ?
     `)
     .run(
@@ -107,9 +109,9 @@ export function updateEmuImportPlanRow(planId: string, row: EmuImportPlanRowReco
       row.ghLogin,
       row.ghScimId,
       row.emuStatus,
+      row.copilotSeatStatus,
       row.status,
       row.detail,
-      row.passwordForLogin,
       row.action,
       nowIso(),
       planId,
@@ -174,9 +176,9 @@ function toImportRow(row: RowRecord): ImportEmuUserRow {
     ghLogin: row.gh_login,
     ghScimId: row.gh_scim_id,
     emuStatus: row.emu_status,
+    copilotSeatStatus: row.copilot_seat_status,
     status: row.status,
     detail: row.detail,
-    passwordForLogin: row.password_for_login,
   };
 }
 

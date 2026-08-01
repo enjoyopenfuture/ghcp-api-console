@@ -5,6 +5,7 @@ import { config } from '../config.js';
 declare module 'express-serve-static-core' {
   interface Request {
     identity?: string;
+    rawBody?: Buffer;
   }
 }
 
