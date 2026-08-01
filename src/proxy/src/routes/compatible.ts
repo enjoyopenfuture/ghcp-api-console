@@ -33,6 +33,7 @@ import {
   webSearchUnsupportedMessage,
 } from './claudeCodeCompat.js';
 import { resolveClaudeCodeOptimized } from './claudeCodeMode.js';
+import { resolveRequestIntent } from './requestIntent.js';
 
 export const compatibleRouter = Router();
 
@@ -216,7 +217,14 @@ function prepareForward(
   pipeOptions?: PipeOptions;
   preflightError?: { status: number; type: string; message: string };
 } {
-  if (!claudeCodeOptimized || !path.startsWith('/v1/messages')) return { body };
+  if (!claudeCodeOptimized || !path.startsWith('/v1/messages')) {
+    return {
+      body,
+      forwardOptions: {
+        initiator: resolveRequestIntent(path, body, req.get('x-initiator')).initiator,
+      },
+    };
+  }
   const prepared = prepareClaudeCodeMessagesRequest(req, body, { tokenCounting: path === '/v1/messages/count_tokens' });
   return {
     body: prepared.body,

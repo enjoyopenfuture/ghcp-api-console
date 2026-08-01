@@ -191,9 +191,9 @@ curl http://localhost:8002/healthz
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/v1/models` | 返回 OpenAI 风格模型列表；请求解析为 Claude Code 优化模式时只返回 `/v1/messages` 模型，保持 Copilot 原始模型名。 |
-| `POST` | `/chat/completions` | 转发 OpenAI Chat Completions 形状请求。 |
-| `POST` | `/responses` | 转发 OpenAI Responses 形状请求。 |
-| `POST` | `/v1/messages` | 转发 Anthropic Messages 形状请求。 |
+| `POST` | `/chat/completions` | 转发 OpenAI Chat Completions 形状请求；合法入站 `x-initiator` 优先透传，否则末条 `role:"tool"` 判为 `agent`。 |
+| `POST` | `/responses` | 转发 OpenAI Responses 形状请求；合法入站 `x-initiator` 优先透传，否则末条 `*_call_output` 判为 `agent`。 |
+| `POST` | `/v1/messages` | 转发 Anthropic Messages 形状请求；合法入站 `x-initiator` 优先透传，否则根据 `tool_result`、compact 和自动续轮判定请求意图。 |
 | `POST` | `/v1/messages/count_tokens` | 仅请求解析为 Claude Code 优化模式时提供；必要时本地估算 token。 |
 
 管理/服务间接口：

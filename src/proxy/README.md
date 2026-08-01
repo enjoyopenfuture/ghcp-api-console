@@ -170,6 +170,7 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 - 上游 401 会清除当前 identity 的 OAuth token 并标记为 `expired`；管理员需要重新授权或导入新 token。403 作为 seat/组织策略错误透传，不清除 token。
 - 未知 identity 会触发初始化并返回 202：`{ error: { code: "account_initializing", ... } }`。
 - 不支持的路径返回 404，并列出当前支持路径。
+- 所有 POST 转发都会向 Copilot 发送 `x-initiator`。若入站 `x-initiator` 去除首尾空白并忽略大小写后为 `user` 或 `agent`，Proxy 会优先采用并规范为小写；其他值不会透传，而是回退到请求内容判断。无合法 header 时，Anthropic Messages 的末条 `tool_result`、compact/summary 和自动 `Please continue.`，Chat Completions 的末条 `role:"tool"`，以及 Responses 的末条 `*_call_output` 输入会判为 `agent`，其余请求判为 `user`。该规则同时适用于直接转发和 Claude Code 优化模式。
 
 #### Claude Code 优化模式
 
@@ -180,7 +181,7 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 - **请求体清理**：递归移除 `cache_control.scope`；删除 Claude Code 注入的易变 `# currentDate` 块；过滤无签名、占位或签名含 `@` 的历史 assistant `thinking` 块；去掉 `"Tool loaded."` 边界消息；合并普通 user message 内的 `tool_result + text`，但含 `tool_reference` 的 ToolSearch result 保持独立 content，避免构造 Copilot 不接受的混合 block；末尾 assistant message 后追加 `Please continue.`；非 `defer_loading` 的 `mcp__ide__executeCode` 会被移除。
 - **mid-conversation system**：对多数模型，历史中间位置的 `role:"system"` 会改成 `role:"user"`，并给首个 text block 加 `[Claude Code injected]\n` 前缀；仅 profile 标记可接受且位置合法的模型会保留原 system message。
 - **Headers / beta**：转发时使用 OpenCode 风格 header：OAuth `Authorization: Bearer`、`User-Agent: opencode/<version>`、`X-GitHub-Api-Version: 2026-06-01`、`Openai-Intent: conversation-edits` 和 `x-initiator`。`anthropic-version` 默认 `2023-06-01`；`anthropic-beta` 只保留允许的 token，并按请求内容派生 `interleaved-thinking-2025-05-14`、`context-management-2025-06-27`、`advanced-tool-use-2025-11-20`、`token-counting-2024-11-01`；会丢弃 `claude-code-*`、陈旧 prompt-caching 和已知 Copilot 不接受的全局 beta。
-- **请求意图**：普通用户请求发送 `x-initiator: user`；compact、工具结果续轮、自动 continue 等请求发送 `x-initiator: agent`，compact 请求额外发送 `x-interaction-type: conversation-other`。
+- **请求意图**：沿用公共 POST 转发的 `x-initiator` 优先级；合法入站值优先于内容推断。无合法 header 时，普通用户请求发送 `user`，compact、`tool_result` 续轮和自动 continue 发送 `agent`；compact 无论 initiator 是否由 header 覆盖，都会额外发送 `x-interaction-type: conversation-other`。
 - **视觉与不支持能力**：请求中出现 image content block 时设置 `Copilot-Vision-Request: true`。`/v1/files*` 返回 Anthropic 风格 `not_supported`；`web_search` / `web_search_*` server tool 会在本地前置拒绝，提示改用支持的模型/账号或 MCP 搜索工具。
 - **token count**：`/v1/messages/count_tokens` 复用同一套 body 预处理和前置错误检查，优先转发 Copilot；若上游返回 404/405/501，则用本地 JSON 长度估算 `{ input_tokens }`。
 - **SSE**：`/v1/messages` 的 SSE 基本透传，保留 Copilot 扩展字段；仅过滤 Copilot 末尾的 OpenAI 风格 `[DONE]` 事件，避免 Claude Code 按 Anthropic SSE 解析时报错。

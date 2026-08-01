@@ -4,6 +4,7 @@ import {
   normalizeAnthropicModelId,
   type AnthropicModelProfile,
 } from './anthropicModelProfiles.js';
+import { AUTOMATIC_CONTINUE_PROMPT, resolveRequestIntent } from './requestIntent.js';
 
 export interface ClaudeCodeForwardOptions {
   claudeCodeOptimized: true;
@@ -38,7 +39,6 @@ const TOKEN_COUNTING_BETA = 'token-counting-2024-11-01';
 const CONTEXT_1M_BETA = 'context-1m-2025-08-07';
 const INJECTED_SYSTEM_MARKER = '[Claude Code injected]\n';
 const TOOL_LOADED_MARKER = 'Tool loaded.';
-const CONTINUE_PROMPT = 'Please continue.';
 
 const ALLOWED_ANTHROPIC_BETAS = new Set([
   INTERLEAVED_THINKING_BETA,
@@ -57,7 +57,7 @@ export function prepareClaudeCodeMessagesRequest(
 ): ClaudeCodePreparedRequest {
   const prepared = preprocessClaudeCodeMessagesBody(body);
   const profile = getAnthropicModelProfile(stringField(prepared.model) ?? '');
-  const intent = inferRequestIntent(prepared);
+  const intent = resolveRequestIntent('/v1/messages', prepared, req.get('x-initiator'));
   const unsupportedTool = firstWebSearchToolType(prepared);
 
   return {
@@ -451,7 +451,7 @@ function fixTrailingAssistantMessage(body: Record<string, unknown>): void {
   if (!messages || messages.length === 0) return;
   const last = recordField(messages[messages.length - 1]);
   if (last?.role !== 'assistant') return;
-  messages.push({ role: 'user', content: [{ type: 'text', text: CONTINUE_PROMPT }] });
+  messages.push({ role: 'user', content: [{ type: 'text', text: AUTOMATIC_CONTINUE_PROMPT }] });
 }
 
 function containsAdvancedToolUse(body: Record<string, unknown>): boolean {
@@ -483,64 +483,12 @@ function webSearchUnsupportedMessageForTool(toolType: string): string {
   );
 }
 
-function inferRequestIntent(body: Record<string, unknown>): { initiator: 'user' | 'agent'; interactionType?: string } {
-  if (isCompactRequest(body)) return { initiator: 'agent', interactionType: 'conversation-other' };
-
-  const last = lastMessage(body);
-  if (last && messageContainsContentBlockType(last, 'tool_result')) return { initiator: 'agent' };
-  if (last && collectText(last.content).trim() === CONTINUE_PROMPT) return { initiator: 'agent' };
-  return { initiator: 'user' };
-}
-
-function isCompactRequest(body: Record<string, unknown>): boolean {
-  const systemText = collectText(body.system).trimStart();
-  const lastUserText = collectText(lastMessageWithRole(body, 'user')?.content).trimStart();
-  return (
-    systemText.startsWith('<compact-summary>') ||
-    lastUserText.startsWith('<compact-summary>') ||
-    /^(compact|summarize|summary of (the )?conversation|continue (from|with) (the )?summary)/i.test(lastUserText)
-  );
-}
-
-function lastMessage(body: Record<string, unknown>): Record<string, unknown> | undefined {
-  const messages = Array.isArray(body.messages) ? body.messages : [];
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = recordField(messages[index]);
-    if (message) return message;
-  }
-  return undefined;
-}
-
-function lastMessageWithRole(body: Record<string, unknown>, role: string): Record<string, unknown> | undefined {
-  const messages = Array.isArray(body.messages) ? body.messages : [];
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = recordField(messages[index]);
-    if (message?.role === role) return message;
-  }
-  return undefined;
-}
-
-function messageContainsContentBlockType(message: Record<string, unknown>, blockType: string): boolean {
-  return containsContentBlockType(message.content, blockType);
-}
-
 function containsContentBlockType(value: unknown, blockType: string): boolean {
   if (Array.isArray(value)) return value.some((item) => containsContentBlockType(item, blockType));
   const object = recordField(value);
   if (!object) return false;
   if (object.type === blockType) return true;
   return Object.values(object).some((child) => containsContentBlockType(child, blockType));
-}
-
-function collectText(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.map(collectText).filter(Boolean).join('\n');
-  const object = recordField(value);
-  if (!object) return '';
-  if (typeof object.text === 'string') return object.text;
-  if (typeof object.content === 'string') return object.content;
-  if (object.content !== undefined) return collectText(object.content);
-  return '';
 }
 
 function cloneJson(value: unknown): unknown {
