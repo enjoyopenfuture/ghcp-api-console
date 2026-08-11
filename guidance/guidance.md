@@ -4,6 +4,8 @@
 
 > **重要**：GitHub Copilot 当前不提供面向第三方服务端集成的正式公开裸 API。本项目依赖 GitHub Copilot 内部接口，适合学习、验证和自维护部署。用于生产前，需要**自行评估**合规、稳定性、安全、账号管理、日志留存和运维风险。
 
+> **时间花费**：大约 30分钟 - 2小时， 取决于你对 GitHub Enterprise、SAML/SCIM、Copilot、Docker Compose 和 Node.js 的熟悉程度。
+
 ## 1. 你最终会配置出什么
 
 完成本文步骤后，系统会形成如下链路：
@@ -26,6 +28,29 @@ Client / SDK / Internal App
 | `sso` | `7001` | 自定义 SAML IdP；管理本地 SSO 用户、SCIM/EMU、Copilot seat 和 AI Credits。 |
 | `login` | `7003` | 通过 GitHub Device Flow 和 Playwright 完成 SSO 授权，并把 Copilot OAuth token 回写给 `proxy`。 |
 | `console` | `7004` | Web 管理控制台；统一操作 `proxy`、`sso`、`login` 的内部 API。 |
+
+
+### 1.1 操作步骤总览
+
+整体顺序由一个依赖环决定：创建管理 PAT 需要一个已同步到 GitHub 的 EMU 管理员，而创建该管理员又需要 SSO/Console 先跑起来并完成 SAML + SCIM 配置。因此本文采用"先建 EMU 骨架 → 起本地服务 → 打通 SAML/SCIM → 同步管理员 → 再补 PAT 与 Billing/Copilot"的顺序，请勿跳步。
+
+| # | 步骤 | 章节 | 在哪里操作 | 完成标志 |
+| ---: | --- | --- | --- | --- |
+| 1 | 创建 GitHub Enterprise EMU，设置初始超级管理员密码 | [4](#4-创建-github-enterprise-emu) | GitHub | 可用 `<shortcode>_admin` 登录 Enterprise |
+| 2 | 生成 SCIM token | [5](#5-生成-scim-token) | GitHub | token 已保存并写入 `.env` |
+| 3 | 准备 `.env`、生成 SAML 证书、启动 SSO 与 Console | [6.1–6.3](#6-配置并启动本项目基础服务) | 本地/服务器 | `http://localhost:7004` 可打开并创建 Console 管理员 |
+| 4 | 创建首个 SSO 管理员用户，确认 Runtime Settings | [6.4–6.5](#64-创建首个-sso-管理员用户) | Console | 用户已建，`emailDomain` 等已按企业实际值调整 |
+| 5 | 在 GitHub 配置 SAML SSO 并启用 SCIM | [7](#7-配置-github-enterprise-saml-sso) | GitHub | SAML 测试通过，recovery code 已离线保存 |
+| 6 | 把首个管理员同步到 GitHub EMU | [8](#8-同步首个管理员到-github-enterprise) | Console | `emuStatus` 成功、`ghLogin` 已写入（seat 阶段失败属预期） |
+| 7 | 用新 EMU 管理员创建管理 PAT，写入 `GITHUB_COPILOT_SEAT_PAT` 并重启 SSO | [9](#9-创建-github-管理-pat) | GitHub + `.env` | SSO 重启后 seat/AI Credits 接口可用 |
+| 8 | 配置 Billing、激活 Enterprise、开通并配置 Copilot、分配 seat | [10](#10-配置-billing-与开通-copilot) | GitHub | 测试用户 `copilotSeatStatus` 为 `assigned` |
+| 9 | 完整部署与健康检查 | [11](#11-完整部署与健康检查) | 服务器 | `npm run validate:health` 通过 |
+| 10 | 通过 Console 验证账号、登录任务与请求统计 | [12](#12-ghcp-api-console-页面使用说明) | Console | Proxy OAuth 状态 `valid`、Login task `success` |
+| 11 | 最终用户调用 API 验证链路 | [13](#13-最终用户如何调用-api) | 客户端 | `/v1/models` 与 `/v1/messages` 正常返回 |
+
+> 第 6 步会出现"SCIM 成功但 Copilot seat 分配失败"的中间状态，这是本顺序下的预期结果，完成第 7、8 步后再重新分配 seat 即可。逐项验收清单见[第 16 节](#16-完成配置后的验收清单)。
+
+> **如果仅是快速为EMU的enterprise开通copilot**，则仅执行第 1、8 步即可。**注意**：在省略了 2-7 步时，一定要在第8步（[10.4.2 节](#1042-如果您跳过了sso的设置步骤则一定要在设置完账单信息后点击激活)）做激活操作，否则需要补充完成前面的步骤才可以激活enterprise。
 
 ## 2. 关键概念
 
@@ -124,7 +149,7 @@ Enterprise、Billing、管理员身份和 EMU 用户资料会影响企业验证�
 
 登录 GitHub 后，从个人 profile 菜单进入 Enterprise 创建入口。此处使用的是个人 GitHub 账号完成 Enterprise 创建动作；完成 EMU 初始化后，日常管理会切换到 EMU 管理员账号。
 
-![从个人 GitHub 账号创建 Enterprise](images/01.0.create-gh-enterprise.png)
+<img src="images/01.0.create-gh-enterprise.png" alt="从个人 GitHub 账号创建 Enterprise" width="720">
 
 操作要点：
 
@@ -136,7 +161,7 @@ Enterprise、Billing、管理员身份和 EMU 用户资料会影响企业验证�
 
 Enterprise 类型选择 **Enterprise with managed users**。Identity Provider 选择 **Custom or Other**，表示后续由本项目的 `sso` 服务作为自定义 SAML IdP。
 
-![选择 EMU 与自定义 IdP](images/01.1.choose-EMU.png)
+<img src="images/01.1.choose-EMU.png" alt="选择 EMU 与自定义 IdP" width="560">
 
 不要选择普通 Enterprise users 模式，否则后续无法按本文方式通过 SCIM 批量管理 EMU 用户。
 
@@ -144,7 +169,7 @@ Enterprise 类型选择 **Enterprise with managed users**。Identity Provider �
 
 填写 Enterprise slug、shortcode 和管理员邮箱。管理员邮箱必须真实可用，因为 GitHub 会把初始超级管理员的密码重置链接发送到该邮箱。
 
-![填写 EMU 信息](images/01.2.fill-EMU-Info.png)
+<img src="images/01.2.fill-EMU-Info.png" alt="填写 EMU 信息" width="624">
 
 填写时请特别注意：
 
@@ -157,11 +182,11 @@ Enterprise 类型选择 **Enterprise with managed users**。Identity Provider �
 
 创建成功后，打开管理员邮箱中的 GitHub 邮件，使用其中的密码重置链接设置初始超级管理员密码。
 
-![查看管理员邮箱](images/01.3.check-admin-email.png)
+<img src="images/01.3.check-admin-email.png" alt="查看管理员邮箱" width="580">
 
 设置密码后，使用 `admin_<shortcode>` 登录 GitHub Enterprise 管理页面。
 
-![登录 Enterprise 管理页面](images/01.4.login-to-gh-ent.png)
+<img src="images/01.4.login-to-gh-ent.png" alt="登录 Enterprise 管理页面" width="893">
 
 此时个人 GitHub 账号不再直接承担该 EMU Enterprise 的日常管理员身份。后续会通过本项目创建一个新的 SSO 管理员用户，并同步成 GitHub Enterprise 管理员。
 
@@ -169,7 +194,7 @@ Enterprise 类型选择 **Enterprise with managed users**。Identity Provider �
 
 进入 GitHub Enterprise settings 中的 SAML/SCIM 或 provisioning 相关页面，生成 SCIM token。
 
-![生成 SCIM token](images/02.0.generate-scim-token.png)
+<img src="images/02.0.generate-scim-token.png" alt="生成 SCIM token" width="1110">
 
 生成后立即复制并保存。SCIM token 后续写入根目录 `.env`：
 
@@ -381,7 +406,7 @@ npm run start:console
 
 截图中的步骤展示了启动sso的配置文件：
 
-![配置并启动 SSO 与 Console](images/02.3.config-and-start-sso-console.png)
+<img src="images/02.3.config-and-start-sso-console.png" alt="配置并启动 SSO 与 Console" width="605">
 
 启动后打开：
 
@@ -395,7 +420,7 @@ http://localhost:7004
 
 在 console 的 SSO Users 页面创建第一个 SSO 用户，并将它设置为管理员角色。该用户同步到 GitHub Enterprise 后，会作为新的 GitHub Enterprise 管理员使用。
 
-![创建首个 SSO 管理员用户](images/02.4.create-1st-admin-user.png)
+<img src="images/02.4.create-1st-admin-user.png" alt="创建首个 SSO 管理员用户" width="1440">
 
 用户名和邮箱应对应真实管理员身份。文档中的 `alice` 等名称仅为示例；正式初始化不要使用 `admin01`、`user01`、`user02` 等占位账号，也不要建立供多人共享的管理员账号。
 
@@ -442,7 +467,7 @@ Settings 更新带版本号并使用乐观锁；另一管理员已先保存时 C
 
 回到 GitHub Enterprise settings，进入 SAML SSO 配置页面。
 
-![打开 SAML SSO 设置](images/02.1.add-saml-sso.png)
+<img src="images/02.1.add-saml-sso.png" alt="打开 SAML SSO 设置" width="1137">
 
 ### 7.2 填写 SAML 配置
 
@@ -454,7 +479,7 @@ Settings 更新带版本号并使用乐观锁；另一管理员已先保存时 C
 | Issuer | `<SSO_PUBLIC_BASE_URL>/metadata` |
 | Public certificate | `certs/idp-cert.pem` 文件内容 |
 
-![填写 SAML SSO 信息](images/02.5.fill-saml-sso-info.png)
+<img src="images/02.5.fill-saml-sso-info.png" alt="填写 SAML SSO 信息" width="999">
 
 配置关系必须保持一致：
 
@@ -480,7 +505,7 @@ GitHub 保存配置前通常会提供测试链接。点击测试链接后，如�
 
 SAML 配置保存成功后，GitHub 会生成 recovery code。
 
-![保存 recovery code](images/02.6.save-recovery-code-after-saml-config.png)
+<img src="images/02.6.save-recovery-code-after-saml-config.png" alt="保存 recovery code" width="659">
 
 请按企业安全规范离线保存。后续使用初始超级管理员 `admin_<shortcode>` 登录时，可能需要消耗 recovery code。recovery code 不应进入仓库、截图、IM 工具或工单正文。
 
@@ -488,18 +513,18 @@ SAML 配置保存成功后，GitHub 会生成 recovery code。
 
 在 SAML 配置页面打开 **Open SCIM Configuration**。
 
-![启用 SCIM 配置](images/02.7.enable-scim.png)
+<img src="images/02.7.enable-scim.png" alt="启用 SCIM 配置" width="1018">
 
 如果没有启用 SCIM，后续从本项目同步用户到 GitHub Enterprise 会失败。同步过程还会尝试分配 Copilot seat；因此 SCIM 已成功但管理 PAT 或 Copilot 尚未配置时，也可能看到 seat 分配失败。应根据 SSO Users 中的 `emuStatus`、`copilotSeatStatus` 和错误详情区分两个阶段。
 
-![同步前可能出现的配置错误](images/02.9.expected-error-when-sync.png)
+<img src="images/02.9.expected-error-when-sync.png" alt="同步前可能出现的配置错误" width="664">
 
 
 ## 8. 同步首个管理员到 GitHub Enterprise
 
 回到 console 的 SSO Users 页面，选择第 6.4 节创建的管理员用户，执行同步 GitHub login / EMU 的操作。
 
-![同步首个管理员到 GitHub](images/03.0.sync-1st-admin-to-gh.png)
+<img src="images/03.0.sync-1st-admin-to-gh.png" alt="同步首个管理员到 GitHub" width="790">
 
 `sync_emu` 会先执行 SCIM，再继续尝试分配 Copilot seat。此时 PAT 和 Copilot 尚未配置，整次操作可能在 seat 阶段显示失败，但用户的 `emuStatus` 和 `ghLogin` 已成功写入；这是本初始化顺序下的预期中间状态。完成第 9、10 节后，再执行分配 seat。
 
@@ -518,13 +543,13 @@ SAML 配置保存成功后，GitHub 会生成 recovery code。
 
 使用已经同步成功的 GitHub Enterprise 管理员账号登录 GitHub，进入个人 developer settings，创建 PAT。
 
-![创建 GitHub 管理 PAT](images/03.1.create-admin-pat.png)
+<img src="images/03.1.create-admin-pat.png" alt="创建 GitHub 管理 PAT" width="945">
 
 ### 9.2 配置 PAT 权限
 
 PAT 需要覆盖本项目调用的 GitHub Enterprise Copilot seat 和 billing usage API。
 
-![配置 PAT 权限](images/03.2.pat-permission.png)
+<img src="images/03.2.pat-permission.png" alt="配置 PAT 权限" width="770">
 
 权限选择原则：
 
@@ -554,7 +579,7 @@ npm run compose:up
 
 进入 GitHub Enterprise billing 页面，填写 payment information。
 
-![填写 payment information](images/04.0.fill-paymentinfo.png)
+<img src="images/04.0.fill-paymentinfo.png" alt="填写 payment information" width="812">
 
 公司名称、billing address、国家或地区、税务信息和付款联系人尽量真实准确，并与合同、付款方式及企业法定主体保持一致。不要为了快速通过初始化而填写虚构或临时信息。
 
@@ -562,29 +587,38 @@ npm run compose:up
 
 如果 shipping information 与 billing information 一致，可以直接复用。
 
-![复用 shipping information](images/04.1.reuse-shipping-info.png)
+<img src="images/04.1.reuse-shipping-info.png" alt="复用 shipping information" width="467">
 
 ### 10.3 关联 Azure Subscription
 
 在 billing 页面添加 Azure Subscription。
 
-![添加 Azure Subscription](images/04.2.add-azure-sub.png)
+<img src="images/04.2.add-azure-sub.png" alt="添加 Azure Subscription" width="1098">
 
 跳转到 Microsoft / Azure 登录页时，使用具备订阅管理权限的 Azure 管理员账号完成授权。
+**注意**：使用的azure账号，需要至少是azure订阅的账单管理员，并且azure订阅所在的tenant的管理员在Entra ID的enterprise application里启用了SPV (Github Subscription Permission Validation)。用tenant管理员做这一步的操作会最大程度上简化azure上的权限设置。这个配置仅需操作一次。
 
-![使用 Azure 管理员授权](images/04.3.login-azure-admin.png)
+<img src="images/04.3.login-azure-admin.png" alt="使用 Azure 管理员授权" width="527">
 
 应使用企业正式管理的 Microsoft Entra tenant 和已验证的企业自有域名。不要使用免费/试用 tenant。
 
 授权完成后回到 GitHub，确认 Azure billing 状态正常。
 
-![确认 Azure billing 已配置](images/04.4.configured-azure-billing.png)
+<img src="images/04.4.configured-azure-billing.png" alt="确认 Azure billing 已配置" width="1422">
 
 ### 10.4 激活 GitHub Enterprise
 
 账单信息配置完成后，激活 GitHub Enterprise。
 
-![激活 GitHub Enterprise](images/04.5.activate-enterprise.png)
+#### 10.4.1 如果是按顺序完成前面步骤，则可以在下图点击激活：
+
+<img src="images/04.5.activate-enterprise.png" alt="激活 GitHub Enterprise" width="1446">
+
+**注意**：如果没有看到上图的激活按钮，则需要退出 设置管理员 shortcode_admin 账号，使用已经同步到 GitHub Enterprise 的管理员账号登录后才能看到激活按钮。
+
+#### 10.4.2 如果您跳过了SSO的设置步骤，则一定要在设置完账单信息后点击激活：
+
+<img src="images/04.5.activate-enterprise-directly.png" alt="跳过 SSO 设置时直接激活 GitHub Enterprise" width="817">
 
 Enterprise 激活完成后，才能继续处理 Copilot 功能开通和 seat 分配。
 
@@ -592,7 +626,7 @@ Enterprise 激活完成后，才能继续处理 Copilot 功能开通和 seat 分
 
 如果 Enterprise 中尚未启用 Copilot，需要在 GitHub Support （ https://support.github.com/ ）提交工单，请求开通 GitHub Copilot 功能。
 
-![申请开通 Copilot](images/04.6.enable-copilot-feature.png)
+<img src="images/04.6.enable-copilot-feature.png" alt="申请开通 Copilot" width="1455">
 
 建议记录工单号。如果有 GitHub 销售或客户成功联系人，可以提供工单号以便加速处理。
 
@@ -600,7 +634,7 @@ Enterprise 激活完成后，才能继续处理 Copilot 功能开通和 seat 分
 
 Copilot 开通后，进入 Enterprise Copilot 设置页面，按企业策略配置相关功能选项。
 
-![配置 Copilot 功能参数](images/04.8.configure-copilot-option.png)
+<img src="images/04.8.configure-copilot-option.png" alt="配置 Copilot 功能参数" width="1269">
 
 这些选项可能影响：
 
@@ -613,11 +647,11 @@ Copilot 开通后，进入 Enterprise Copilot 设置页面，按企业策略配�
 
 可以在 GitHub Enterprise 页面直接给用户分配 Copilot seat。
 
-![在 GitHub Enterprise 分配 Copilot seat](images/04.9.0.assign-copilot-seats-on-gh.png)
+<img src="images/04.9.0.assign-copilot-seats-on-gh.png" alt="在 GitHub Enterprise 分配 Copilot seat" width="1426">
 
 也可以在本项目 console 中对 SSO 用户执行分配或确认 seat 状态。
 
-![在 console 中确认 Copilot seat](images/04.9.1.assign-copilot-seats-sso.png)
+<img src="images/04.9.1.assign-copilot-seats-sso.png" alt="在 console 中确认 Copilot seat" width="793">
 
 建议至少先给管理员用户分配一个 seat，并确认本项目能正确读取或更新 seat 状态。后续普通用户首次访问 proxy 时，也可以通过 `sso` 的同步逻辑尝试自动分配 seat。
 
@@ -700,7 +734,7 @@ Proxy 错误诊断默认每文件 50 MB、最多 5 个文件，按大小轮转�
 
 Dashboard 用于查看整体运行状态。顶部指标卡展示 Proxy account 总数及 valid 数、SSO user 总数及 active 数、近期 Login task 失败数，以及近期请求的 input/output/cache token 汇总；下方分别列出最近失败的登录任务和 Proxy 请求。
 
-![Dashboard 页面](images/05.0.dashboard.png)
+<img src="images/05.0.dashboard.png" alt="Dashboard 页面" width="1441">
 
 建议日常先看 Dashboard。Login failures 增加时进入 Login Tasks；Recent failed proxy requests 出现记录时，根据 failure 摘要继续检查 Request Stats、Proxy Accounts 或 Error Diagnostics。
 
@@ -708,7 +742,7 @@ Dashboard 用于查看整体运行状态。顶部指标卡展示 Proxy account �
 
 SSO Users 页面用于管理本地 SSO 用户和 GitHub EMU 同步。
 
-![SSO Users 页面](images/05.1.0.sso-page.png)
+<img src="images/05.1.0.sso-page.png" alt="SSO Users 页面" width="1445">
 
 常用操作：
 
@@ -721,7 +755,7 @@ SSO Users 页面用于管理本地 SSO 用户和 GitHub EMU 同步。
 
 如果 GitHub Enterprise 中已有用户，也可以从 GitHub/SCIM 反向导入。这个功能请慎用，主要是为了两个系统之间对账用。
 
-![从 GitHub 导入 SSO 用户](images/05.1.1.sso-import-from-gh.png)
+<img src="images/05.1.1.sso-import-from-gh.png" alt="从 GitHub 导入 SSO 用户" width="662">
 
 导入建议先 preview，再确认 apply，避免覆盖本地已有用户关系。
 
@@ -729,7 +763,7 @@ SSO Users 页面用于管理本地 SSO 用户和 GitHub EMU 同步。
 
 AI Credits Usage 页面用于读取和刷新 Enterprise AI Credits 用量。
 
-![AI Credits Usage 页面](images/05.2.AICs-view.png)
+<img src="images/05.2.AICs-view.png" alt="AI Credits Usage 页面" width="1440">
 
 刷新时，`sso` 会调用 GitHub billing usage summary API，读取上月和本月 `copilot_ai_unit` 用量并缓存。页面中还会显示当前已分配 seat 数量和按每 seat 每月 19 美元估算的 seat 成本。
 
@@ -744,7 +778,7 @@ AI Credits Usage 页面用于读取和刷新 Enterprise AI Credits 用量。
 
 Request Stats 页面用于查看 proxy 接收的请求统计，包括路径、模型、成功状态、失败原因、input token、output token、cache token 等。
 
-![Request Stats 与 token 页面](images/05.3.token-view.png)
+<img src="images/05.3.token-view.png" alt="Request Stats 与 token 页面" width="1431">
 
 `REQUEST_STATS_PER_ACCOUNT_LIMIT` 的代码默认值、Compose fallback 和环境变量示例均为 `2`。记录保存在 Proxy SQLite 中，可根据排障窗口和磁盘容量调整；该限制按 identity 分别生效。排查模型不可用、路径不匹配或 Copilot OAuth token 失效时，优先查看这里。
 
@@ -752,7 +786,7 @@ Request Stats 页面用于查看 proxy 接收的请求统计，包括路径、�
 
 Proxy Accounts 页面展示当前 proxy 中生效的账号状态。
 
-![Proxy Accounts 页面](images/05.4.accouts-in-proxy.png)
+<img src="images/05.4.accouts-in-proxy.png" alt="Proxy Accounts 页面" width="1448">
 
 常用操作：
 
@@ -770,7 +804,7 @@ Details 和 Reauthorize Copilot 只适用于单个账号，未选择或同时选
 
 Login Tasks 页面展示 `login` 服务的自动登录任务。
 
-![Login Tasks 页面](images/05.4.auto-login-view.png)
+<img src="images/05.4.auto-login-view.png" alt="Login Tasks 页面" width="1449">
 
 常见状态含义：
 
@@ -788,7 +822,7 @@ Login Tasks 页面展示 `login` 服务的自动登录任务。
 
 Settings 页面包含 Console administrator password、SSO runtime settings 和 Login runtime settings。
 
-![Settings 页面](images/05.5.console-setting.png)
+<img src="images/05.5.console-setting.png" alt="Settings 页面" width="1438">
 
 修改 Console 管理员密码时必须输入当前密码、新密码和确认密码。保存成功后，新密码立即用于后续登录，当前浏览器 session 保持登录；密码会以新的随机 salt 和 scrypt hash 写回 `ADMINS_FILE`，不会保存明文。
 
@@ -800,7 +834,7 @@ SSO runtime settings 包括最大用户数、fallback user prefix、默认 email
 
 Error Diagnostics 页面用于排查 Copilot 上游错误。Proxy 在以下场景生成记录：
 
-![Error Diagnostics 页面](images/05.6.error-request-diagnostics.png)
+<img src="images/05.6.error-request-diagnostics.png" alt="Error Diagnostics 页面" width="1459">
 
 - Copilot 返回 HTTP 4xx/5xx；
 - fetch 连接、DNS、网络或 abort 失败；
