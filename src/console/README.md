@@ -211,7 +211,7 @@ Proxy 当前没有可由 Console 修改的 runtime settings。`REQUEST_STATS_PER
 | `listEmuImportPlanRows(planId,{ page,pageSize,status })` | `GET /api/console/sso/users/emu/import/plans/:planId/rows` | `PageResponse<ImportEmuUserRow>` |
 | `applyEmuImportPlan(planId)` | `POST /api/console/sso/users/emu/import/plans/:planId/apply` | `ImportEmuPlanDto` |
 | `deleteEmuImportPlan(planId)` | `DELETE /api/console/sso/users/emu/import/plans/:planId` | `void` |
-| `runSsoUserBatch({ operation,ssoUsers,enterpriseRole? })` | `POST /api/console/sso/users/batch` | `BatchResult<SsoUserBatchRow>` |
+| `runSsoUserBatch({ operation,ssoUsers,enterpriseRole?,assignCopilotSeat? })` | `POST /api/console/sso/users/batch` | `BatchResult<SsoUserBatchRow>`；`sync_emu` 默认只同步 login，显式传 `assignCopilotSeat=true` 时同时分配 seat。 |
 | `readAiCreditsUsage()` | `GET /api/console/sso/ai-credits/usage` | `AiCreditsUsageDto` |
 | `refreshAiCreditsUsage()` | `POST /api/console/sso/ai-credits/usage/refresh` | `AiCreditsUsageDto` |
 

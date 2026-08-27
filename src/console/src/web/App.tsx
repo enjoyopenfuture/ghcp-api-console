@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { AiCreditsUsageDto, BatchResult, ImportCopilotOauthTokenRow, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUserStatus, LoginRuntimeSettingsDto, LoginRuntimeSettingsValues, LoginTaskDto, LoginTaskStatus, ProxyAccountDto, ProxyErrorDiagnosticDetailDto, ProxyErrorDiagnosticsListResponse, ProxyRequestStatDto, SsoRuntimeSettingsDto, SsoRuntimeSettingsValues, SsoType, SsoUserBatchOperation, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto } from '@ghcp/shared';
+import type { AiCreditsUsageDto, BatchResult, ImportCopilotOauthTokenRow, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUserStatus, LoginRuntimeSettingsDto, LoginRuntimeSettingsValues, LoginTaskDto, LoginTaskStatus, ProxyAccountDto, ProxyErrorDiagnosticDetailDto, ProxyErrorDiagnosticsListResponse, ProxyRequestStatDto, SsoRuntimeSettingsDto, SsoRuntimeSettingsValues, SsoType, SsoUserBatchOperation, SsoUserBatchRequest, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto } from '@ghcp/shared';
 import { api, ConsoleApiError } from './api/client.js';
 import { cancelLoginTask, deleteLoginTask, getLoginRuntimeSettings, listLoginTasks, listLoginTasksPage, retryLoginTask, updateLoginRuntimeSettings } from './api/login.js';
 import { clearErrorDiagnostics, deleteProxyAccount, downloadErrorDiagnostic, getErrorDiagnostic, importCopilotOauthTokens, listErrorDiagnostics, listProxyAccounts, listRequestStats, reauthorizeCopilotOauth } from './api/proxy.js';
@@ -25,7 +25,8 @@ import { Card, CardDescription, CardTitle } from './components/ui/card.js';
 import { Dialog } from './components/ui/dialog.js';
 import { Input } from './components/ui/input.js';
 import { Textarea } from './components/ui/textarea.js';
-import { formatDate, formatNumber, statusTone, tokenTotal } from './lib/format.js';
+import { Tooltip } from './components/ui/tooltip.js';
+import { formatDate, formatNumber, formatRelativeDate, statusTone, tokenTotal } from './lib/format.js';
 
 interface SetupState {
   initialized: boolean;
@@ -273,6 +274,7 @@ function UsersPage(props: { notify: Notify }) {
   const [bulkAction, setBulkAction] = useState<string>();
   const [batchResult, setBatchResult] = useState<UserBatchActionResult>();
   const [capacity, setCapacity] = useState<SsoUserCapacityDto>();
+  const [assignCopilotOnSync, setAssignCopilotOnSync] = useState(false);
   const allCurrentPageSelected = users.length > 0 && users.every((user) => selected.has(user.ssoUser));
 
   const load = async (nextPage = page) => {
@@ -324,13 +326,14 @@ function UsersPage(props: { notify: Notify }) {
     operation: SsoUserBatchOperation,
     label: string,
     confirmMessage?: (count: number) => string,
+    requestOptions: Pick<SsoUserBatchRequest, 'assignCopilotSeat'> = {},
   ) => {
     const ssoUsers = [...selected];
     if (ssoUsers.length === 0) return;
     if (confirmMessage && !window.confirm(confirmMessage(ssoUsers.length))) return;
     setBulkAction(label);
     try {
-      const result = await runSsoUserBatch({ operation, ssoUsers });
+      const result = await runSsoUserBatch({ operation, ssoUsers, ...requestOptions });
       const failed = result.rows.filter((row) => row.status === 'failed');
       const warnings = result.summary.warnings ?? result.rows.filter((row) => row.warning).length;
       setBatchResult({ title: label, result });
@@ -349,20 +352,28 @@ function UsersPage(props: { notify: Notify }) {
 
   return (
     <div className="space-y-4">
-      <Card>
-        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-          <div className="flex flex-1 flex-col gap-2">
-            <div className="flex gap-2">
-              <Input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search SSO user, email, or GH login" className="max-w-md flex-1" />
-              <Button variant="secondary" onClick={() => { clearSelection(); void load(1); }}>Search</Button>
-            </div>
+      <Card className="relative">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+          <form
+            className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center"
+            onSubmit={(event) => {
+              event.preventDefault();
+              clearSelection();
+              void load(1);
+            }}
+          >
+            <Input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search SSO user, email, or GH login" className="flex-1 w-full max-w-xl" />
+            <Button type="submit" variant="secondary">Search</Button>
+          </form>
+          <div className="flex flex-wrap items-center gap-2">
             {capacity ? (
-              <p className={capacity.reached ? 'text-sm font-medium text-red-700' : 'text-sm text-slate-600'}>
-                SSO user capacity: {capacity.current}{capacity.limit === null ? ' (unlimited)' : ` / ${capacity.limit} (${capacity.remaining} remaining)`}
-              </p>
+              <span className={`rounded-full border px-3 py-1.5 text-xs font-medium ${
+                capacity.reached ? 'border-red-200 bg-red-50 text-red-700' : 'border-slate-200 bg-slate-50 text-slate-600'
+              }`}>
+                {capacity.current}{capacity.limit === null ? ' users / unlimited' : ` / ${capacity.limit} users`}
+                {capacity.remaining !== null ? ` - ${capacity.remaining} remaining` : ''}
+              </span>
             ) : null}
-          </div>
-          <div className="flex flex-wrap gap-2">
             <Button variant="secondary" onClick={() => setBatchOpen(true)} disabled={!capacity || capacity.reached}>Batch create</Button>
             <Button variant="secondary" onClick={() => setImportOpen(true)}>Import CSV</Button>
             <Button variant="secondary" onClick={() => setEmuImportOpen(true)}>Import from GH</Button>
@@ -373,7 +384,14 @@ function UsersPage(props: { notify: Notify }) {
       <BulkUserActionBar
         count={selected.size}
         busy={bulkAction}
-        onSync={() => runBulkUserAction('sync_emu', 'Sync GH login')}
+        assignCopilotOnSync={assignCopilotOnSync}
+        onAssignCopilotOnSyncChange={setAssignCopilotOnSync}
+        onSync={() => runBulkUserAction(
+          'sync_emu',
+          'Sync GH login',
+          undefined,
+          assignCopilotOnSync ? { assignCopilotSeat: true } : {},
+        )}
         onAssignCopilot={() => runBulkUserAction('assign_copilot', 'Assign Copilot seat')}
         onRemoveCopilot={() => runBulkUserAction('remove_copilot', 'Remove Copilot seat', (count) => `Remove Copilot seat(s) for ${count} selected user(s)?`)}
         onSuspend={() => runBulkUserAction('suspend_emu', 'Suspend GH login', (count) => `Suspend ${count} selected GH login(s)?`)}
@@ -383,42 +401,40 @@ function UsersPage(props: { notify: Notify }) {
       />
       {error ? <ErrorState message={error} /> : null}
       {loading ? <LoadingState label="Loading users..." /> : null}
-      <Card className="overflow-hidden p-0">
-        <Table>
-          <thead>
-            <tr>
-              <Th><input type="checkbox" checked={allCurrentPageSelected} onChange={(event) => setCurrentPageSelected(event.target.checked)} aria-label="Select all users on current page" /></Th>
-              <Th>SSO user</Th>
-              <Th>Email</Th>
-              <Th>Role</Th>
-              <Th>GH login</Th>
-              <Th>Status</Th>
-              <Th>Copilot seat</Th>
-              <Th>Updated</Th>
-              <Th>Actions</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((user) => (
-              <tr key={user.ssoUser}>
-                <Td><input type="checkbox" checked={selected.has(user.ssoUser)} onChange={(event) => setUserSelected(user.ssoUser, event.target.checked)} aria-label={`Select ${user.ssoUser}`} /></Td>
-                <Td className="font-medium">{user.ssoUser}</Td>
-                <Td>{user.email}</Td>
-                <Td><Badge tone={user.role === 'admin' ? 'info' : 'default'}>{user.role}</Badge></Td>
-                <Td>{user.ghLogin ?? '-'}</Td>
-                <Td><Badge tone={statusTone(user.emuStatus)}>{user.emuStatus}</Badge></Td>
-                <Td><CopilotSeatCell user={user} /></Td>
-                <Td>{formatDate(user.updatedAt)}</Td>
-                <Td>
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="secondary" onClick={() => setEditing(user)}>Edit</Button>
-                  </div>
-                </Td>
+      <Card className="p-0">
+        <div className="min-h-48 max-h-[70vh] overflow-auto rounded-lg">
+          <Table>
+            <thead className="sticky top-0 z-10">
+              <tr>
+                <Th><input type="checkbox" checked={allCurrentPageSelected} onChange={(event) => setCurrentPageSelected(event.target.checked)} aria-label="Select all users on current page" /></Th>
+                <Th>SSO user</Th>
+                <Th>Email</Th>
+                <Th>Role</Th>
+                <Th>GH login</Th>
+                <Th>Status</Th>
+                <Th>Copilot seat</Th>
+                <Th>Updated</Th>
+                <Th>Actions</Th>
               </tr>
-            ))}
-            {users.length === 0 ? <EmptyRow colSpan={9} label="No SSO users found." /> : null}
-          </tbody>
-        </Table>
+            </thead>
+            <tbody>
+              {users.map((user) => (
+                <tr key={user.ssoUser}>
+                  <Td><input type="checkbox" checked={selected.has(user.ssoUser)} onChange={(event) => setUserSelected(user.ssoUser, event.target.checked)} aria-label={`Select ${user.ssoUser}`} /></Td>
+                  <Td className="font-medium">{user.ssoUser}</Td>
+                  <Td className="max-w-64 truncate" title={user.email}>{user.email}</Td>
+                  <Td><Badge tone={user.role === 'admin' ? 'info' : 'default'}>{user.role}</Badge></Td>
+                  <Td>{user.ghLogin ?? '-'}</Td>
+                  <Td><Badge tone={statusTone(user.emuStatus)}>{user.emuStatus}</Badge></Td>
+                  <Td><CopilotSeatCell user={user} /></Td>
+                  <Td title={formatDate(user.updatedAt)}>{formatRelativeDate(user.updatedAt)}</Td>
+                  <Td><Button variant="secondary" onClick={() => setEditing(user)}>Edit</Button></Td>
+                </tr>
+              ))}
+              {users.length === 0 ? <EmptyRow colSpan={9} label="No SSO users found." /> : null}
+            </tbody>
+          </Table>
+        </div>
       </Card>
       <Pagination page={page} total={total} pageSize={25} onPage={(next) => { clearSelection(); void load(next); }} />
       <CreateUserDialog open={createOpen} onClose={() => setCreateOpen(false)} onDone={async () => { setCreateOpen(false); await load(1); props.notify('SSO user created.'); }} />
@@ -439,6 +455,8 @@ interface UserBatchActionResult {
 function BulkUserActionBar(props: {
   count: number;
   busy?: string;
+  assignCopilotOnSync: boolean;
+  onAssignCopilotOnSyncChange: (checked: boolean) => void;
   onSync: () => void;
   onAssignCopilot: () => void;
   onRemoveCopilot: () => void;
@@ -449,17 +467,56 @@ function BulkUserActionBar(props: {
 }) {
   const disabled = props.count === 0 || Boolean(props.busy);
   return (
-    <Card className="border-blue-200 bg-blue-50">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <p className="text-sm font-medium text-blue-900">{props.count} selected</p>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={props.onSync} disabled={disabled}>{props.busy === 'Sync GH login' ? 'Syncing...' : 'Sync GH login'}</Button>
-          <Button variant="secondary" onClick={props.onAssignCopilot} disabled={disabled}>{props.busy === 'Assign Copilot seat' ? 'Assigning...' : 'Assign Copilot seat'}</Button>
-          <Button variant="secondary" onClick={props.onRemoveCopilot} disabled={disabled}>{props.busy === 'Remove Copilot seat' ? 'Removing...' : 'Remove Copilot seat'}</Button>
-          <Button variant="secondary" onClick={props.onSuspend} disabled={disabled}>{props.busy === 'Suspend GH login' ? 'Suspending...' : 'Suspend GH login'}</Button>
-          <Button variant="secondary" onClick={props.onDeleteEmu} disabled={disabled}>{props.busy === 'Delete GH login data' ? 'Deleting...' : 'Delete GH login'}</Button>
-          <Button variant="danger" onClick={props.onDeleteSso} disabled={disabled}>{props.busy === 'Delete SSO users' ? 'Deleting...' : 'Delete Users'}</Button>
-          <Button variant="ghost" onClick={props.onClear} disabled={Boolean(props.busy)}>Clear selection</Button>
+    <Card className={`sticky top-36 z-20 shadow-md backdrop-blur lg:top-24 ${props.count > 0 ? 'border-blue-200 bg-blue-50/95' : 'bg-white/95'}`}>
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between gap-3">
+          <p className={`text-sm font-semibold ${props.count > 0 ? 'text-blue-950' : 'text-slate-700'}`}>{props.count} user{props.count === 1 ? '' : 's'} selected</p>
+          <Button variant="ghost" className="px-2 py-1 text-xs" onClick={props.onClear} disabled={disabled}>Clear selection</Button>
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-[minmax(22rem,1.35fr)_minmax(16rem,1fr)_minmax(20rem,1.15fr)_auto] 2xl:items-end">
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">GitHub sync</p>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <Tooltip content="Create or update the selected GH managed logins. A Copilot seat is assigned only when this option is selected.">
+                <Button variant="warning" onClick={props.onSync} disabled={disabled}>{props.busy === 'Sync GH login' ? 'Syncing...' : 'Sync GH login'}</Button>
+              </Tooltip>
+              <label className="flex items-center gap-2 whitespace-nowrap px-1 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={props.assignCopilotOnSync}
+                  disabled={disabled}
+                  onChange={(event) => props.onAssignCopilotOnSyncChange(event.target.checked)}
+                />
+                Also assign Copilot seat
+              </label>
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Copilot</p>
+            <div className="flex flex-wrap gap-2">
+              <Tooltip content="Assign a Copilot seat to each selected user that already has a GH login.">
+                <Button variant="secondary" onClick={props.onAssignCopilot} disabled={disabled}>{props.busy === 'Assign Copilot seat' ? 'Assigning...' : 'Assign seat'}</Button>
+              </Tooltip>
+              <Tooltip content="Remove the Copilot seat from each selected GH login without changing the GH login or local SSO user.">
+                <Button variant="secondary" onClick={props.onRemoveCopilot} disabled={disabled}>{props.busy === 'Remove Copilot seat' ? 'Removing...' : 'Remove seat'}</Button>
+              </Tooltip>
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">GH account</p>
+            <div className="flex flex-wrap gap-2">
+              <Tooltip content="Suspend each selected GH managed login. Copilot seats and local SSO users are not removed.">
+                <Button variant="warning" onClick={props.onSuspend} disabled={disabled}>{props.busy === 'Suspend GH login' ? 'Suspending...' : 'Suspend'}</Button>
+              </Tooltip>
+              <Tooltip content="Remove the Copilot seat, delete the provisioned GH login, and reset its local sync status. The local SSO user and Proxy data are retained.">
+                <Button variant="dangerOutline" onClick={props.onDeleteEmu} disabled={disabled}>{props.busy === 'Delete GH login data' ? 'Deleting...' : 'Delete GH login'}</Button>
+              </Tooltip>
+            </div>
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Local account</p>
+            <Button variant="danger" onClick={props.onDeleteSso} disabled={disabled}>{props.busy === 'Delete SSO users' ? 'Deleting...' : 'Delete Users'}</Button>
+          </div>
         </div>
       </div>
     </Card>
@@ -467,11 +524,18 @@ function BulkUserActionBar(props: {
 }
 
 function CopilotSeatCell(props: { user: SsoUserDto }) {
+  const updated = props.user.copilotSeatUpdatedAt ? formatDate(props.user.copilotSeatUpdatedAt) : undefined;
   return (
-    <div className="flex max-w-xs flex-col gap-1">
-      <StatusWithDate status={props.user.copilotSeatStatus} date={props.user.copilotSeatUpdatedAt} />
+    <div className="flex max-w-48 items-center gap-1.5">
+      <Badge tone={statusTone(props.user.copilotSeatStatus)} title={updated}>{props.user.copilotSeatStatus}</Badge>
       {props.user.copilotSeatLastError ? (
-        <span className="truncate text-xs text-red-600" title={props.user.copilotSeatLastError}>{props.user.copilotSeatLastError}</span>
+        <span
+          className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-red-50 text-xs font-bold text-red-700"
+          title={props.user.copilotSeatLastError}
+          aria-label={props.user.copilotSeatLastError}
+        >
+          !
+        </span>
       ) : null}
     </div>
   );

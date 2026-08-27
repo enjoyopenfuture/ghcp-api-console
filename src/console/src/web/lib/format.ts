@@ -6,6 +6,26 @@ export function formatDate(value?: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+export function formatRelativeDate(value?: string): string {
+  if (!value) return '-';
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return value;
+  const elapsedSeconds = Math.round((Date.now() - timestamp) / 1000);
+  const future = elapsedSeconds < 0;
+  const elapsed = Math.abs(elapsedSeconds);
+  if (elapsed < 60) return future ? 'in a moment' : 'just now';
+  const units: Array<[number, string]> = [
+    [31_536_000, 'y'],
+    [2_592_000, 'mo'],
+    [86_400, 'd'],
+    [3_600, 'h'],
+    [60, 'm'],
+  ];
+  const [seconds, label] = units.find(([unitSeconds]) => elapsed >= unitSeconds) ?? units[units.length - 1]!;
+  const amount = Math.floor(elapsed / seconds);
+  return future ? `in ${amount}${label}` : `${amount}${label} ago`;
+}
+
 export function formatNumber(value?: number): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : '-';
 }

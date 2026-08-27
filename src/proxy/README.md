@@ -20,7 +20,7 @@ Proxy 位于客户端与 GitHub Copilot 后端之间，负责：
 | 公共代理鉴权 | `src/auth/apiKey.ts` | 公共 Copilot 兼容接口必须提供 `Authorization: Bearer <API_KEY>` 或 `x-api-key: <API_KEY>`。 |
 | 身份解析 | `src/auth/identityHeader.ts` | 从 `IDENTITY_HEADER` 读取身份；默认必填，关闭后缺省为 `default`。 |
 | 内部接口鉴权 | `src/auth/internalAuth.ts` | `/api/*` 与 `/internal/*` 必须提供 `X-Internal-Token`。 |
-| 账号初始化 | `src/copilot/copilotAuthManager.ts` | 首次访问未知 `identity` 时异步确保 SSO 用户、同步 GH 登录、创建账号并排队登录任务；请求先返回 202。 |
+| 账号初始化 | `src/copilot/copilotAuthManager.ts` | 首次访问未知 `identity` 时异步确保 SSO 用户、同步 GH 登录并分配 Copilot seat、创建账号并排队登录任务；请求先返回 202。 |
 | Copilot OAuth 管理 | `src/accounts/copilotOauthTokenImport.ts`、`src/db/accountsRepo.ts` | 支持 `/models` 验证后 CSV 导入、Login 服务写入、失败标记和手动重新授权排队。 |
 | 模型与路径校验 | `src/copilot/copilotClient.ts` | 使用 OAuth bearer 读取 `/models`，判断模型是否适用于当前 API 路径；缓存按 identity 隔离 1 小时，失败时可短期使用旧缓存。 |
 | 请求转发 | `src/routes/compatible.ts` | 使用 OpenCode headers 转发 JSON/SSE 响应；上游 401 时清除 OAuth token 并要求重新授权。 |

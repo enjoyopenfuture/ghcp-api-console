@@ -52,7 +52,7 @@ SSO 数据库只保存 scrypt 密码哈希和 salt，不能还原用户的明文
 
 ### Copilot seats 与 AI Credits
 
-- `sync_emu` 成功后会自动尝试分配 Copilot seat。
+- `sync_emu` 默认只同步 GH login；请求显式传入 `assignCopilotSeat=true` 时才会继续尝试分配 Copilot seat。
 - 可单独调用 assign/remove seat API。
 - seat 状态写入 `sso_users.copilot_seat_*`；失败会记录 `assign_failed` / `remove_failed` 和错误信息。
 - AI Credits 刷新会查询 GitHub billing usage summary，固定使用 `sku=copilot_ai_unit`，缓存上月和本月用量。
@@ -192,7 +192,7 @@ Runtime settings snapshot 当前缓存在进程内；多个 SSO 实例共享同�
 | `POST` | `/users/:ssoUser/copilot-seat` | path: `ssoUser` | `SsoUserDto` |
 | `DELETE` | `/users/:ssoUser/copilot-seat` | path: `ssoUser` | `SsoUserDto` |
 
-`/users/batch.operation` 当前支持：`sync_emu`、`suspend_emu`、`delete_emu`、`delete_sso`、`assign_copilot`、`remove_copilot`。`enterpriseRole` 仅允许 `user` 或 `enterprise_owner`。
+`/users/batch.operation` 当前支持：`sync_emu`、`suspend_emu`、`delete_emu`、`delete_sso`、`assign_copilot`、`remove_copilot`。`enterpriseRole` 仅允许 `user` 或 `enterprise_owner`；`assignCopilotSeat` 为可选 boolean，仅用于让 `sync_emu` 在同步成功后继续分配 seat，默认 `false`。
 
 `GET /users` 的 `sort` 当前支持 `ssoUser`、`email`、`role`、`emuStatus`、`createdAt`；`dir` 支持 `asc` / `desc`；`pageSize` 最大 100。
 

@@ -73,7 +73,7 @@ usersApiRouter.post('/users/import', (req, res) => {
 });
 
 usersApiRouter.post('/users/batch', async (req, res) => {
-  const body = req.body as { operation?: unknown; ssoUsers?: unknown; enterpriseRole?: unknown };
+  const body = req.body as { operation?: unknown; ssoUsers?: unknown; enterpriseRole?: unknown; assignCopilotSeat?: unknown };
   if (typeof body.operation !== 'string' || !SSO_USER_BATCH_OPERATIONS.has(body.operation)) {
     res.status(400).json(apiError('invalid_operation', 'operation must be one of sync_emu, suspend_emu, delete_emu, delete_sso, assign_copilot, remove_copilot.'));
     return;
@@ -90,16 +90,23 @@ usersApiRouter.post('/users/batch', async (req, res) => {
     res.status(400).json(apiError('invalid_enterprise_role', 'enterpriseRole must be "user" or "enterprise_owner".'));
     return;
   }
+  if (body.assignCopilotSeat !== undefined && typeof body.assignCopilotSeat !== 'boolean') {
+    res.status(400).json(apiError('invalid_assign_copilot_seat', 'assignCopilotSeat must be a boolean when provided.'));
+    return;
+  }
   const operation = body.operation as SsoUserBatchOperation;
   const enterpriseRole = body.enterpriseRole as ScimEnterpriseRole | undefined;
+  const assignCopilotSeat = body.assignCopilotSeat as boolean | undefined;
   await sendAsync(res, 'batch-users', {
     operation,
     total: body.ssoUsers.length,
     enterpriseRole,
+    assignCopilotSeat,
   }, () => runSsoUserBatch({
     operation,
     ssoUsers: body.ssoUsers as string[],
     enterpriseRole,
+    assignCopilotSeat,
   }));
 });
 

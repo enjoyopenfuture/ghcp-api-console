@@ -140,16 +140,24 @@ export async function deleteSsoUser(ssoUser: string): Promise<{ deleted: boolean
   return { deleted, warning: seatRemoval.warning };
 }
 
-export async function syncSsoUser(ssoUser: string, enterpriseRole?: ScimEnterpriseRole): Promise<SsoUserDto> {
+export async function syncSsoUser(ssoUser: string, enterpriseRole?: ScimEnterpriseRole, shouldAssignCopilotSeat = false): Promise<SsoUserDto> {
   const user = requireUser(ssoUser);
   const resolvedEnterpriseRole = enterpriseRole ?? enterpriseRoleForSsoUser(user);
-  logger.info('sync-emu-start', 'Syncing SSO user to GH login', { ssoUser, enterpriseRole: resolvedEnterpriseRole });
+  logger.info('sync-emu-start', 'Syncing SSO user to GH login', {
+    ssoUser,
+    enterpriseRole: resolvedEnterpriseRole,
+    assignCopilotSeat: shouldAssignCopilotSeat,
+  });
   const provisioned = await syncUser(user, resolvedEnterpriseRole);
   const updated = updateEmu(ssoUser, {
     ghLogin: provisioned.ghLogin,
     ghScimId: provisioned.scimId,
     emuStatus: 'active',
   });
+  if (!shouldAssignCopilotSeat) {
+    logger.info('sync-emu-done', 'Synced SSO user to GH login', { ssoUser, ghLogin: updated.ghLogin, ghScimId: updated.ghScimId });
+    return toDto(updated);
+  }
   const withSeat = await assignCopilotSeatForUser(updated, provisioned.ghLogin);
   logger.info('sync-emu-done', 'Synced SSO user to GH login and assigned Copilot seat', { ssoUser, ghLogin: withSeat.ghLogin, ghScimId: withSeat.ghScimId });
   return toDto(withSeat);
@@ -195,7 +203,12 @@ export async function runSsoUserBatch(input: SsoUserBatchRequest): Promise<Batch
   const startedAt = nowIso();
   const ssoUsers = uniqueSsoUsers(input.ssoUsers);
   let rows: SsoUserBatchRow[];
-  logger.info('batch-start', 'Starting SSO user batch operation', { operation: input.operation, total: ssoUsers.length, enterpriseRole: input.enterpriseRole });
+  logger.info('batch-start', 'Starting SSO user batch operation', {
+    operation: input.operation,
+    total: ssoUsers.length,
+    enterpriseRole: input.enterpriseRole,
+    assignCopilotSeat: input.assignCopilotSeat,
+  });
   if (input.operation === 'sync_emu') {
     rows = await mapWithConcurrency(ssoUsers, getSsoRuntimeSettings().bulkSyncConcurrency, (ssoUser) => runBatchResultRow(ssoUser, input));
   } else {
@@ -323,7 +336,7 @@ function requireUser(ssoUser: string): SsoUserRecord {
 async function runSsoUserBatchRow(ssoUser: string, input: SsoUserBatchRequest): Promise<SsoUserOperationOutcome> {
   switch (input.operation) {
     case 'sync_emu':
-      return { user: await syncSsoUser(ssoUser, input.enterpriseRole) };
+      return { user: await syncSsoUser(ssoUser, input.enterpriseRole, input.assignCopilotSeat === true) };
     case 'assign_copilot':
       return { user: await assignCopilotSeatForSsoUser(ssoUser) };
     case 'remove_copilot':
@@ -343,7 +356,7 @@ async function runSsoUserBatchRow(ssoUser: string, input: SsoUserBatchRequest): 
 async function runBatchResultRow(ssoUser: string, input: SsoUserBatchRequest): Promise<SsoUserBatchRow> {
   try {
     const outcome = await runSsoUserBatchRow(ssoUser, input);
-    return { ssoUser, status: 'success', detail: batchSuccessDetail(input.operation), user: outcome.user, warning: outcome.warning };
+    return { ssoUser, status: 'success', detail: batchSuccessDetail(input), user: outcome.user, warning: outcome.warning };
   } catch (err) {
     return { ssoUser, status: 'failed', detail: err instanceof Error ? err.message : String(err) };
   }
@@ -377,10 +390,12 @@ function uniqueSsoUsers(ssoUsers: string[]): string[] {
   return result;
 }
 
-function batchSuccessDetail(operation: SsoUserBatchRequest['operation']): string {
-  switch (operation) {
+function batchSuccessDetail(input: SsoUserBatchRequest): string {
+  switch (input.operation) {
     case 'sync_emu':
-      return 'Synced to EMU and assigned Copilot seat.';
+      return input.assignCopilotSeat
+        ? 'Synced to EMU and assigned Copilot seat.'
+        : 'Synced to EMU.';
     case 'assign_copilot':
       return 'Assigned Copilot seat.';
     case 'remove_copilot':

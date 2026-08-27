@@ -220,6 +220,7 @@ export interface SsoUserBatchRequest {
   operation: SsoUserBatchOperation;
   ssoUsers: string[];
   enterpriseRole?: 'user' | 'enterprise_owner';
+  assignCopilotSeat?: boolean;
 }
 
 export interface SsoUserBatchRow {

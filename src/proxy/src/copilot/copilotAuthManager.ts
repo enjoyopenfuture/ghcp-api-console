@@ -112,7 +112,7 @@ class CopilotAuthManager {
   }
 
   private async initializeEnsuredIdentity(identity: string, ensured: EnsureSsoUserResponse): Promise<void> {
-    const synced = await syncEmuUser(ensured.user.ssoUser);
+    const synced = await syncEmuUser(ensured.user.ssoUser, { assignCopilotSeat: true });
     if (!synced.ghLogin) throw new Error(`SSO user "${ensured.user.ssoUser}" did not return a GH login.`);
     const oauthAttemptId = randomUUID();
     createAccount({
