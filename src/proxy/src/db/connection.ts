@@ -1,18 +1,62 @@
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import Database from 'better-sqlite3';
+import { readFileSync } from 'node:fs';
+import { createPool, type PoolOptions } from 'mysql2/promise';
 import { config } from '../config.js';
-import { runMigrations } from './migrations.js';
+import { MysqlStorage } from './mysqlStorage.js';
+import { SqliteStorage } from './sqliteStorage.js';
+import type { ProxyStorage } from './storageTypes.js';
 
-let db: Database.Database | undefined;
+let storage: ProxyStorage | undefined;
+let initialization: Promise<void> | undefined;
 
-export function getDb(): Database.Database {
-  if (!db) {
-    mkdirSync(dirname(config.dbPath), { recursive: true });
-    db = new Database(config.dbPath);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-    runMigrations(db);
+export function getStorage(): ProxyStorage {
+  if (!storage) {
+    storage = config.storageDriver === 'mysql'
+      ? createMysqlStorage()
+      : new SqliteStorage(config.dbPath, config.requestStatsPerAccountLimit);
   }
-  return db;
+  return storage;
+}
+
+export function initializeStorage(): Promise<void> {
+  if (!initialization) {
+    initialization = getStorage().initialize().catch((err: unknown) => {
+      initialization = undefined;
+      throw err;
+    });
+  }
+  return initialization;
+}
+
+export async function pingStorage(): Promise<void> {
+  await initializeStorage();
+  await getStorage().ping();
+}
+
+export async function closeStorage(): Promise<void> {
+  if (!storage) return;
+  await storage.close();
+  storage = undefined;
+  initialization = undefined;
+}
+
+function createMysqlStorage(): MysqlStorage {
+  const poolOptions: PoolOptions = {
+    uri: config.mysqlUrl!,
+    connectionLimit: config.mysqlConnectionLimit,
+    waitForConnections: true,
+    queueLimit: 0,
+    timezone: 'Z',
+    dateStrings: true,
+    decimalNumbers: true,
+    enableKeepAlive: true,
+  };
+  if (config.mysqlSslMode === 'required') {
+    poolOptions.ssl = { rejectUnauthorized: false };
+  } else if (config.mysqlSslMode === 'verify-ca') {
+    poolOptions.ssl = {
+      ca: readFileSync(config.mysqlSslCaPath!, 'utf8'),
+      rejectUnauthorized: true,
+    };
+  }
+  return new MysqlStorage(createPool(poolOptions), config.requestStatsPerAccountLimit);
 }

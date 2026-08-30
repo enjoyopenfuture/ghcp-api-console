@@ -24,6 +24,8 @@ export const errorDiagnosticsStore = new ErrorDiagnosticsStore({
   redacted: config.errorDiagnosticsRedact,
   maxFileBytes: config.errorDiagnosticsMaxFileBytes,
   maxFiles: config.errorDiagnosticsMaxFiles,
+  shared: config.errorDiagnosticsShared,
+  instanceId: config.errorDiagnosticsInstanceId,
 });
 
 export interface ErrorDiagnosticContext {

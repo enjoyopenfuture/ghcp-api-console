@@ -35,6 +35,18 @@ export function runMigrations(db: Database.Database): void {
   addColumnIfMissing(db, 'proxy_request_stats', 'cache_input_tokens', 'INTEGER');
   addColumnIfMissing(db, 'proxy_request_stats', 'cache_write_tokens', 'INTEGER');
   copyLegacyCacheReadTokens(db);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS proxy_identity_initializations (
+      identity TEXT PRIMARY KEY,
+      claim_id TEXT NOT NULL,
+      lease_expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_proxy_identity_initializations_lease
+      ON proxy_identity_initializations(lease_expires_at);
+  `);
 }
 
 function migrateCopilotOauthCredentials(db: Database.Database): void {

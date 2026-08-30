@@ -97,7 +97,7 @@ SAML SSO 解决“用户如何登录 GitHub Enterprise”的问题；SCIM 解决
 | --- | --- | --- |
 | `API_KEY` | 本项目 Proxy 公共接口的本地访问 key。 | 当前部署共享；真正的用户归属由 identity header 决定。 |
 | `GITHUB_COPILOT_SEAT_PAT` | SSO 服务使用的企业管理 PAT，只用于 Copilot seat 管理和 AI Credits 查询。 | 否，由企业管理员维护。 |
-| Copilot OAuth token | Login 使用 OpenCode OAuth client 完成 GitHub Device Flow 后获得，回写并保存在 `proxy.sqlite`；Proxy 直接用它访问 Copilot API。 | 是，每个 Proxy identity 单独保存。 |
+| Copilot OAuth token | Login 使用 OpenCode OAuth client 完成 GitHub Device Flow 后获得，回写并保存在 Proxy 数据库（SQLite 或 MySQL，见 [6.1.2 节](#612-选择-proxy-数据库类型sqlite-或-mysql)）；Proxy 直接用它访问 Copilot API。 | 是，每个 Proxy identity 单独保存。 |
 
 当前代码不保存独立的 GitHub token，也不存在“Proxy 用 GitHub token 再换取短期 Copilot token”的步骤。`GITHUB_COPILOT_SEAT_PAT` 是管理员用于同步 SSO 用户到 GitHub 上使用的，与最终用户的 Copilot OAuth 授权是两条独立链路。
 
@@ -237,6 +237,7 @@ cp .env.example .env
 | `SCIM_TOKEN` | 第 5 节生成的 SCIM token。 |
 | `GITHUB_COPILOT_SEAT_PAT` | 第 9 节创建的 GitHub 管理 PAT；此时还没有可以先留空，创建后再补。 |
 | `LOGIN_SSO_URL` | Login 容器内 Playwright 能访问的完整 SSO 登录页。Compose 内部使用 `http://sso:7001/login`；不要使用 `127.0.0.1` 或 `localhost`，它们指向 Login 容器自身。跨网络部署时使用从 Login 节点可访问的完整 `/login` URL。 |
+| `STORAGE_DRIVER` | Proxy 数据库类型：`sqlite`（默认，单实例）或 `mysql`（多实例共享）。初次部署保持默认即可，两种模式的完整说明见 [6.1.2 节](#612-选择-proxy-数据库类型sqlite-或-mysql)。 |
 
 如果使用 Docker Compose，默认端口来自 `.env`：
 
@@ -334,6 +335,13 @@ ports:
 
 | 变量 | 模板值/默认值 | 作用 |
 | --- | --- | --- |
+| `STORAGE_DRIVER` | `sqlite` | Proxy 数据库类型：`sqlite` 或 `mysql`；详见 6.1.2 节。 |
+| `DB_PATH` | Compose 为 `/data/proxy.sqlite` | `sqlite` 模式的数据库文件路径，位于 `proxy-data` volume。 |
+| `MYSQL_URL` | 空 | `mysql` 模式必填，指向所有 Proxy 实例共享的外部 MySQL 8 数据库。 |
+| `MYSQL_CONNECTION_LIMIT` | `10` | 每个 Proxy 实例的 MySQL 连接池上限。 |
+| `MYSQL_SSL_MODE` | `disabled` | `disabled`、`required` 或 `verify-ca`；远程/生产数据库应使用 `verify-ca`。 |
+| `MYSQL_SSL_CA_PATH` | 空 | `verify-ca` 模式必填，指向 MySQL CA 证书文件。 |
+| `IDENTITY_INIT_LEASE_SECONDS` | `900` | identity 初始化租约有效期；多 Proxy 实例靠它避免重复初始化同一个 identity。 |
 | `IDENTITY_HEADER` | `X-User-Identity` | Proxy 用于区分最终用户的 header 名。 |
 | `IDENTITY_HEADER_REQUIRED` | `true` | 建议保持 `true`；设为 `false` 且请求缺 header 时会使用共享的 `default` identity。 |
 | `CLAUDE_CODE_OPTIMIZED` | Compose 默认 `true`；代码默认 `false` | Proxy 的 Claude Code/Anthropic Messages 默认兼容模式；单个请求可用 `X-Claude-Code-Optimized` 覆盖。 |
@@ -343,6 +351,8 @@ ports:
 | `PROXY_ERROR_DIAGNOSTICS_REDACT` | `false` | 是否脱敏敏感 headers 和 JSON 字段；默认不脱敏。 |
 | `PROXY_ERROR_DIAGNOSTICS_MAX_FILE_MB` | `50` | 单个轮转文件目标上限 MB。 |
 | `PROXY_ERROR_DIAGNOSTICS_MAX_FILES` | `5` | 包含当前文件在内的最大文件数。 |
+| `PROXY_ERROR_DIAGNOSTICS_SHARED` | `false` | 多 Proxy 实例共用一个 RWX 诊断卷时设为 `true`。 |
+| `PROXY_INSTANCE_ID` | 空（回落到 `HOSTNAME`） | 共享诊断模式下当前实例的独立子目录标识。 |
 | `GITHUB_OAUTH_CLIENT_ID` | OpenCode client id | Login Device Flow 使用的 OAuth client id；除非明确更换兼容 client，否则保持模板值。 |
 | `GITHUB_OAUTH_SCOPE` | `read:user` | Login Device Flow 请求的 scope。 |
 | `COPILOT_API_BASE_URL` | `https://api.githubcopilot.com` | Proxy 直接访问 Copilot API 的 base URL。 |
@@ -367,6 +377,123 @@ ports:
 
 生产环境建议保持 `LOG_LEVEL=info`：这样能看到上游 4xx 的 `warn` 和 5xx/网络/流错误的 `error`。`debug` 只在短时间排障时启用；`LOG_LEVEL=error` 会隐藏上游 4xx，不建议常态使用。错误诊断落盘与 `LOG_LEVEL` 无关，即使使用 `info` 也会按 `PROXY_ERROR_DIAGNOSTICS_ENABLED` 保存完整现场。
 
+### 6.1.2 选择 Proxy 数据库类型：SQLite 或 MySQL
+
+Proxy 支持两种数据库后端，由 `STORAGE_DRIVER` 选择：`sqlite`（默认）或 `mysql`。两种后端保存的业务数据完全相同——Proxy 账号（identity、`ssoUser`、`ghLogin`、Copilot OAuth token 与状态）、最近请求统计、identity 初始化租约——对外行为和 Console 页面也一致，差别只在部署形态。
+
+> **只有 Proxy 有这个选择。** `sso`、`login`、`console` 目前固定使用各自的 SQLite / JSON 文件（`sso.sqlite`、`login.sqlite`、`admins.json`），无论 Proxy 选哪种后端都必须保持单副本。所以“切到 MySQL”只解除 Proxy 的单实例限制，不是整个系统的水平扩展。
+
+| 对比项 | `STORAGE_DRIVER=sqlite` | `STORAGE_DRIVER=mysql` |
+| --- | --- | --- |
+| 数据位置 | `DB_PATH` 指向的本地文件，Compose 默认 `/data/proxy.sqlite`（`proxy-data` volume） | 外部 MySQL 8 数据库，由 `MYSQL_URL` 指定 |
+| 支持的 Proxy 实例数 | **只能 1 个**。同一个 SQLite 文件不能被多个 Proxy 进程/Pod 共享 | 多个 Proxy 实例共享同一个库 |
+| 额外依赖 | 无，开箱即用 | 需要自行准备并运维一套 MySQL 8（含备份、TLS、高可用） |
+| 建表方式 | 启动时自动创建目录、开启 WAL 和外键，并执行 schema 迁移 | 启动时执行 schema 迁移；用 MySQL advisory lock 保证多个 Pod 同时启动时只有一个执行迁移。表为 InnoDB / utf8mb4 |
+| 适用场景 | 单机 Docker Compose、试点验证、个人和小团队 | Kubernetes、多副本、需要滚动升级不中断的部署 |
+
+选择建议：**先用默认的 `sqlite`**。只有当你确实要跑多个 Proxy 副本（负载、可用性或滚动升级需求）时才切换到 `mysql`；单实例场景下 MySQL 不会带来性能收益，只会增加一套需要运维的组件。
+
+#### SQLite 模式（默认）
+
+根 `.env` 保持模板值即可：
+
+```env
+STORAGE_DRIVER=sqlite
+DB_PATH=/data/proxy.sqlite
+```
+
+注意事项：
+
+- 数据库使用 WAL 模式，备份时不能只复制 `proxy.sqlite`，还要一并处理 `proxy.sqlite-wal` 和 `proxy.sqlite-shm`，或先停掉 Proxy 与 Login 再复制。
+- 不要把这个文件放到多节点 NFS/RWX 卷上供多个 Proxy 共享，WAL SQLite 不是分布式数据库，这样做会损坏数据。
+- `MYSQL_*` 相关变量在该模式下被忽略，可以留空。
+
+#### MySQL 模式
+
+| 变量 | 说明 |
+| --- | --- |
+| `STORAGE_DRIVER` | 设为 `mysql`。 |
+| `MYSQL_URL` | **必填**，格式 `mysql://<用户名>:<密码>@<主机>:<端口>/<数据库名>`。为空时 Proxy 会直接启动失败。用户名或密码含特殊字符需要 URL 编码。 |
+| `MYSQL_CONNECTION_LIMIT` | 每个 Proxy 实例的连接池上限，默认 `10`。总连接数约为 `实例数 × 该值`，需要小于 MySQL 的 `max_connections`。 |
+| `MYSQL_SSL_MODE` | `disabled`（默认，仅限同主机/可信内网）、`required`（加密但不校验 CA）、`verify-ca`（加密并校验 CA）。远程或生产数据库应使用 `verify-ca`。 |
+| `MYSQL_SSL_CA_PATH` | `MYSQL_SSL_MODE=verify-ca` 时**必填**，指向 CA 证书文件；缺失时 Proxy 启动失败。 |
+
+准备工作：
+
+1. 创建一个空的 MySQL 8 数据库，字符集使用 `utf8mb4`。
+2. 创建遵循最小权限原则的应用账号；由于 Proxy 启动时会执行 schema 迁移，该账号需要建表和改表权限。
+3. 生产环境为该连接启用 TLS，并把 CA 证书挂载到 `MYSQL_SSL_CA_PATH` 指向的路径。
+
+配置示例：
+
+```env
+STORAGE_DRIVER=mysql
+MYSQL_URL=mysql://ghcp_proxy:<password>@mysql.example.com:3306/ghcp_proxy
+MYSQL_CONNECTION_LIMIT=10
+MYSQL_SSL_MODE=verify-ca
+MYSQL_SSL_CA_PATH=/certs/mysql-ca.pem
+```
+
+生产用的 `docker-compose.yml` 只接收外部 `MYSQL_URL`，不会替你启动 MySQL。仅需本地验证时，可以用仓库中的独立 Compose 文件拉起一个测试库：
+
+```bash
+npm run mysql:test:up
+```
+
+再把 `.env` 配成 Compose 内网地址，并同时加载两个 Compose 文件启动：
+
+```env
+STORAGE_DRIVER=mysql
+MYSQL_URL=mysql://ghcp_proxy:ghcp_proxy_local@mysql:3306/ghcp_proxy
+```
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d --build --wait
+```
+
+`docker-compose.mysql.yml` 中的默认用户名和密码只适用于本地验证，不要用于任何对外环境。
+
+#### 多 Proxy 实例的配套配置
+
+切到 MySQL 只是多实例的前提，还需要注意：
+
+- **初始化租约**：未知 identity 在调用 SSO、SCIM/seat 和 Login 之前必须先取得 `proxy_identity_initializations` 中的租约，因此多个 Proxy 实例不会对同一个 identity 重复执行外部副作用。租约有效期由 `IDENTITY_INIT_LEASE_SECONDS` 控制，默认 `900` 秒。
+- **错误诊断**：诊断记录是文本日志，不写数据库。要让 Console 看到全部实例的记录，需要给所有 Proxy 实例挂载同一个 RWX 卷到 `PROXY_ERROR_DIAGNOSTICS_DIR`，设置 `PROXY_ERROR_DIAGNOSTICS_SHARED=true`，并给每个实例注入唯一的 `PROXY_INSTANCE_ID`（Kubernetes 建议用 Downward API 注入 Pod 名）。
+- **其他服务**：`sso`、`login`、`console` 仍必须保持单副本。
+
+#### 已有 SQLite 数据迁移到 MySQL
+
+Proxy 启动时**绝不会**自动把 SQLite 数据复制到 MySQL；直接改 `STORAGE_DRIVER` 只会得到一个空库。已有数据必须用仓库中的显式迁移工具 [`upgrade/sqlite-to-mysql`](../upgrade/sqlite-to-mysql/README.md)。
+
+大致流程（详细步骤和回滚方式见该工具的 README）：
+
+1. 先用当前版本以 `sqlite` 模式启动一次 Proxy，确保 SQLite schema 已完成最新迁移。
+2. 停止 `proxy` 和 `login`，避免迁移期间产生新的账号、OAuth 回写和请求统计。
+3. 备份 `proxy.sqlite` 及同目录下的 `-wal`、`-shm` 文件。
+4. 先试运行预检（只读，不建表也不复制数据）：
+
+   ```bash
+   npm run upgrade:sqlite-to-mysql -- \
+     --sqlite /path/to/proxy.sqlite \
+     --mysql-url 'mysql://user:password@mysql.example/ghcp_proxy' \
+     --dry-run
+   ```
+
+5. 预检通过后去掉 `--dry-run` 正式执行。工具会创建 schema、在事务中复制 `proxy_accounts` 和 `proxy_request_stats`，并在提交前校验行数；目标库非空时会直接拒绝，此时应恢复或重建一个空库再运行，不要手工合并两个数据库。
+6. 把 Proxy 切到 `STORAGE_DRIVER=mysql` 启动单个实例，确认 `/readyz` 通过，在 Console 核对账号总数和若干 OAuth 状态，再扩容到多实例并重启 `login`。
+
+回滚时停止 Proxy 和 Login，恢复备份的 SQLite 文件，把 `STORAGE_DRIVER` 改回 `sqlite`，并只运行一个 Proxy 实例；切换后只写入 MySQL 的数据不会自动回到 SQLite。
+
+#### 确认当前生效的后端
+
+Proxy 的就绪检查会返回当前存储驱动，可用它确认配置是否真正生效：
+
+```bash
+curl http://localhost:3000/readyz
+# {"status":"ok","service":"proxy","storage":"sqlite"}  或  "storage":"mysql"
+```
+
+`/readyz` 会实际 ping 一次数据库，因此 MySQL 不可达、URL 或 TLS 配置错误时它会失败，而 `/healthz` 仍可能返回成功。
 
 ### 6.2 生成 SAML 证书
 
@@ -665,6 +792,8 @@ Copilot seat 必须分配给真实、独立的用户身份。不得为了减少 
 API_KEY=<strong-random-api-key>
 INTERNAL_API_TOKEN=<strong-random-internal-token>
 SESSION_SECRET=<strong-random-session-secret>
+STORAGE_DRIVER=sqlite
+DB_PATH=/data/proxy.sqlite
 SSO_PUBLIC_BASE_URL=http://sso:7001
 SSO_CERT_DIR=./certs
 SP_ENTITY_ID=https://github.com/enterprises/<enterprise-slug>
@@ -678,7 +807,7 @@ SSO_DEFAULT_USER_PASSWORD=<strong-bootstrap-password>
 LOGIN_SSO_URL=http://sso:7001/login
 ```
 
-上面的 `SSO_PUBLIC_BASE_URL` 和 `LOGIN_SSO_URL` 适用于不开放 7001 的默认 Compose 内网模式，GitHub Sign on URL 应填写 `http://sso:7001/sso`，Issuer 应填写 `http://sso:7001/metadata`。如果选择公网模式或 Login 单独部署在其他节点，应按照 6.1.1 节同时修改这四处地址。`SSO_DEFAULT_USER_PASSWORD` 用于自动创建用户后的首次登录，是多个自动创建用户共享的启动配置；应按高敏感凭据管理。若改为逐用户独立密码，自动流程无法从 hash 反推出密码，需要在 Proxy Accounts 中手动输入实际密码重新授权。
+上面的 `SSO_PUBLIC_BASE_URL` 和 `LOGIN_SSO_URL` 适用于不开放 7001 的默认 Compose 内网模式，GitHub Sign on URL 应填写 `http://sso:7001/sso`，Issuer 应填写 `http://sso:7001/metadata`。如果选择公网模式或 Login 单独部署在其他节点，应按照 6.1.1 节同时修改这四处地址。`STORAGE_DRIVER=sqlite` 是单实例部署的默认值；如果这套部署要跑多个 Proxy 实例，请改为 `mysql` 并按 6.1.2 节补齐 `MYSQL_URL` 与 TLS 参数。`SSO_DEFAULT_USER_PASSWORD` 用于自动创建用户后的首次登录，是多个自动创建用户共享的启动配置；应按高敏感凭据管理。若改为逐用户独立密码，自动流程无法从 hash 反推出密码，需要在 Proxy Accounts 中手动输入实际密码重新授权。
 
 启动服务：
 
@@ -701,6 +830,15 @@ curl http://localhost:7003/healthz
 curl http://localhost:7004/healthz
 ```
 
+Proxy 另外提供 `/readyz`，它会真正 ping 一次数据库并返回当前使用的存储驱动，用来确认 `STORAGE_DRIVER` 是否按预期生效（`npm run validate:health` 对 Proxy 检查的正是这个端点）：
+
+```bash
+curl http://localhost:3000/readyz
+# {"status":"ok","service":"proxy","storage":"sqlite"}
+```
+
+MySQL 模式下 `/readyz` 失败通常意味着 `MYSQL_URL`、网络或 TLS 配置有问题，此时 `/healthz` 仍可能返回成功。
+
 完成后打开 console：
 
 ```text
@@ -715,16 +853,19 @@ Docker Compose 使用以下持久化位置：
 
 | Volume/挂载 | 内容 | 敏感性 |
 | --- | --- | --- |
-| `proxy-data` | `proxy.sqlite`，以及 `error-diagnostics/*.log`：identity/token/统计和完整上游失败现场。 | 高 |
+| `proxy-data` | `sqlite` 模式下的 `proxy.sqlite`，以及两种模式下都会写入的 `error-diagnostics/*.log`：identity/token/统计和完整上游失败现场。 | 高 |
 | `sso-data` | `sso.sqlite`、SSO runtime settings、用户密码哈希、预算缓存和用户事件日志。 | 高 |
 | `login-data` | `login.sqlite`：任务历史和 Login runtime settings。 | 中 |
 | `login-logs` | 账号登录日志、失败截图和 Playwright trace。 | 高 |
 | `console-data` | `admins.json`：Console 管理员密码 hash、salt 和状态。 | 高 |
 | `SSO_CERT_DIR` bind mount | SAML 公钥证书和私钥。 | 私钥为高敏感 |
+| 外部 MySQL（仅 `mysql` 模式） | `proxy_accounts`、`proxy_request_stats`、`proxy_identity_initializations`：identity、OAuth token 和统计。 | 高 |
 
 `docker compose down` 默认保留 named volumes；`docker compose down -v` 会删除上述业务数据，不要在未备份时执行。SQLite 使用 WAL 模式，备份时应停止对应写入服务或使用 SQLite-aware backup，不能在服务运行时只复制主 `.sqlite` 文件而忽略 WAL。恢复后应同时检查文件权限、证书和 `.env` 密钥是否匹配。
 
-当前 SQLite、Login 内存队列和 settings cache 都按单实例设计。不要把 WAL SQLite 文件直接放到多节点 NFS/RWX 卷共享；水平扩容前需要先完成数据库访问、任务领取和缓存失效的多实例改造。
+如果 Proxy 使用 `mysql` 模式，Proxy 账号和统计不在 `proxy-data` 中，必须把外部 MySQL 纳入独立的备份和恢复流程（例如 `mysqldump` 或托管数据库的快照）；`proxy-data` 此时只剩错误诊断日志，但它仍属于高敏感数据。SSO、Login、Console 无论 Proxy 用哪种后端都仍是 SQLite/文件，备份方式不变。
+
+当前 Login 内存队列和 settings cache 都按单实例设计，SSO、Login、Console 也仍使用本地 SQLite/文件。不要把 WAL SQLite 文件直接放到多节点 NFS/RWX 卷共享。Proxy 切换到 MySQL 后可以运行多个实例（见 6.1.2 节），但这只覆盖 Proxy；`sso`、`login`、`console` 必须保持单副本。
 
 Proxy 错误诊断默认每文件 50 MB、最多 5 个文件，按大小轮转。单条记录可能因同时包含原始请求和转换后的请求而超过 50 MB，此时会完整保存，并在下一次写入时轮转。清理记录可在 Console **Error Diagnostics** 页面执行；备份或复制 `proxy-data` 时应假定其中含有可直接使用的 API Key、Copilot token 和用户内容。
 
@@ -780,7 +921,7 @@ Request Stats 页面用于查看 proxy 接收的请求统计，包括路径、�
 
 <img src="images/05.3.token-view.png" alt="Request Stats 与 token 页面" width="1431">
 
-`REQUEST_STATS_PER_ACCOUNT_LIMIT` 的代码默认值、Compose fallback 和环境变量示例均为 `2`。记录保存在 Proxy SQLite 中，可根据排障窗口和磁盘容量调整；该限制按 identity 分别生效。排查模型不可用、路径不匹配或 Copilot OAuth token 失效时，优先查看这里。
+`REQUEST_STATS_PER_ACCOUNT_LIMIT` 的代码默认值、Compose fallback 和环境变量示例均为 `2`。记录保存在 Proxy 数据库（`sqlite` 模式为 `proxy.sqlite`，`mysql` 模式为共享 MySQL 的 `proxy_request_stats` 表），可根据排障窗口和磁盘容量调整；该限制按 identity 分别生效。排查模型不可用、路径不匹配或 Copilot OAuth token 失效时，优先查看这里。
 
 ### 12.5 Proxy Accounts
 
@@ -992,6 +1133,7 @@ curl http://localhost:3000/responses \
 
 - `.env`
 - SQLite 数据库
+- MySQL 连接串（`MYSQL_URL` 含账号密码）及数据库备份/导出文件
 - 日志
 - Proxy `error-diagnostics` 文本日志和从 Console 下载的诊断 `.log`
 - Playwright trace / debug artifact
@@ -1031,7 +1173,10 @@ curl http://localhost:3000/responses \
 - `sso` 没有后台自动对账、自动重试队列或定时任务。
 - SCIM、Copilot seat、proxy 账号清理等跨系统一致性主要依赖显式 API 操作和人工重试。
 - Runtime Settings 缓存在各进程内，多实例之间不会自动同步缓存失效。
-- 三个 SQLite 数据库都使用 WAL；可以支持同一宿主机的并发读取，但不能把数据库文件放到多节点 NFS/RWX 卷上作为分布式数据库使用。
+- `sso.sqlite`、`login.sqlite` 和 `admins.json` 都是本地文件，`sso`、`login`、`console` 必须单副本运行。
+- Proxy 默认的 SQLite 同样只支持单实例；需要多个 Proxy 实例时必须切到 `STORAGE_DRIVER=mysql`，并共享同一个 MySQL 8 数据库（见 [6.1.2 节](#612-选择-proxy-数据库类型sqlite-或-mysql)）。
+- 切换 Proxy 后端不会自动搬迁数据：直接把 `STORAGE_DRIVER` 从 `sqlite` 改成 `mysql` 会得到一个空库，必须先运行 `upgrade/sqlite-to-mysql` 迁移工具。
+- SQLite 使用 WAL；可以支持同一宿主机的并发读取，但不能把数据库文件放到多节点 NFS/RWX 卷上作为分布式数据库使用。
 - Copilot 内部接口可能变化，模型可见性、参数、流式格式和路径兼容性都可能受到影响。
 
 ## 15. 常见问题排查
@@ -1048,6 +1193,10 @@ curl http://localhost:3000/responses \
 | 请求返回 missing identity | 未带 `X-User-Identity`；自定义了 `IDENTITY_HEADER` 但客户端未同步 | 检查 proxy `.env` 和客户端请求头。 |
 | 模型不可用 | 模型不支持目标 API path；账号不可见该模型；`CLAUDE_CODE_OPTIMIZED` 影响 `/v1/models` 返回 | 先调用 `/v1/models`，再按返回模型选择 `/v1/messages`、`/responses` 或 `/chat/completions`。 |
 | Copilot 上游返回 4xx/5xx 或 502 | 请求参数、账号权限、Copilot 服务或网络异常 | 从 proxy 日志取得 `diagnosticId`，在 Error Diagnostics 对比原始请求、实际转发请求和上游响应；大记录下载 JSON。 |
+| Proxy 启动即失败并提示 `MYSQL_URL is required` / `MYSQL_SSL_CA_PATH is required` | 设置了 `STORAGE_DRIVER=mysql` 但没填 `MYSQL_URL`；或 `MYSQL_SSL_MODE=verify-ca` 但没填 CA 路径 | 按 6.1.2 节补齐 `MYSQL_URL`、`MYSQL_SSL_MODE` 和 `MYSQL_SSL_CA_PATH`，注意 URL 中的特殊字符需要编码。 |
+| `/healthz` 正常但 `/readyz` 失败 | MySQL 不可达、账号权限不足、连接池耗尽或 TLS 配置不匹配 | 查看 proxy 容器日志中的 `readiness-failed`；从 Proxy 容器内验证能否连到 MySQL，检查数据库账号权限、`MYSQL_CONNECTION_LIMIT` 与 MySQL `max_connections`。 |
+| 切到 MySQL 后 Console 中账号全部消失 | 直接改了 `STORAGE_DRIVER`，但没有执行数据迁移 | Proxy 不会自动搬迁数据。先切回 `sqlite` 确认原数据完好，再按 6.1.2 节使用 `upgrade/sqlite-to-mysql` 工具迁移。 |
+| 迁移工具报告目标库非空 | 目标 MySQL 中已有 `proxy_accounts` 等数据 | 不要手工合并数据库；恢复或重新创建一个空目标库后重新运行迁移。 |
 | Error Diagnostics 为空 | 诊断被关闭；错误发生在本地鉴权/校验而非 Copilot 上游；记录已轮转或清空 | 检查 `PROXY_ERROR_DIAGNOSTICS_ENABLED`，确认错误类型，再检查诊断目录和轮转配置。 |
 | Copilot OAuth 授权失败 | SSO 密码或 SAML 流程不正确；用户没有 seat；OAuth client/scope 配置错误；GitHub 页面或后端变化 | 检查 `GITHUB_OAUTH_CLIENT_ID`、`GITHUB_OAUTH_SCOPE`、seat 状态和 Login task 日志，然后在 Proxy Accounts 重新授权。 |
 | 原本有效的 Copilot OAuth 变为 `expired` | Copilot API 返回未授权，Proxy 已使当前 token 失效 | 确认用户 seat 和组织策略仍有效，再从 Proxy Accounts 重新授权或导入新的 Copilot OAuth token。 |
@@ -1069,11 +1218,12 @@ curl http://localhost:3000/responses \
 11. Copilot 已开通，管理员或测试用户使用各自独立账号和 seat，不要共享 token、登录态或访问权限。
 12. SSO Users 中测试用户的 Copilot seat 状态为 `assigned`。
 13. `npm run validate:health` 通过。
-14. Dashboard 无异常失败任务。
-15. Proxy Accounts 中测试 identity 的 Copilot OAuth 状态为 `valid`。
-16. Login Tasks 中测试登录任务为 `success`。
-17. `/v1/models` 能返回模型列表。
-18. `/v1/messages` 或 `/responses` 能成功返回模型响应。
-19. 制造一次受控的 Copilot 上游错误后，proxy 日志能输出 `diagnosticId`，Error Diagnostics 能查看并下载对应记录。
+14. `curl http://localhost:3000/readyz` 返回的 `storage` 字段与 `.env` 中的 `STORAGE_DRIVER` 一致；使用 MySQL 时该请求能连通数据库。
+15. Dashboard 无异常失败任务。
+16. Proxy Accounts 中测试 identity 的 Copilot OAuth 状态为 `valid`。
+17. Login Tasks 中测试登录任务为 `success`。
+18. `/v1/models` 能返回模型列表。
+19. `/v1/messages` 或 `/responses` 能成功返回模型响应。
+20. 制造一次受控的 Copilot 上游错误后，proxy 日志能输出 `diagnosticId`，Error Diagnostics 能查看并下载对应记录。
 
 完成以上检查后，本项目的 GitHub Enterprise EMU、SSO、SCIM、Copilot seat、自动登录和 API proxy 主链路即已跑通。

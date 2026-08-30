@@ -1,7 +1,8 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
+import type { Server } from 'node:http';
 import { shouldRedact } from '@ghcp/shared';
 import { config } from './config.js';
-import { getDb } from './db/connection.js';
+import { closeStorage, initializeStorage, pingStorage } from './db/connection.js';
 import { pruneAllRequestStats } from './db/requestStatsRepo.js';
 import { requireApiKey } from './auth/apiKey.js';
 import { requireIdentityHeader } from './auth/identityHeader.js';
@@ -21,6 +22,17 @@ export function buildApp(): express.Express {
   app.use(express.json({ limit: '20mb' }));
   app.get('/healthz', (_req, res) => {
     res.json({ status: 'ok', service: 'proxy' });
+  });
+  app.get('/readyz', async (_req, res) => {
+    try {
+      await pingStorage();
+      res.json({ status: 'ok', service: 'proxy', storage: config.storageDriver });
+    } catch (err) {
+      requestLogger.error('readiness-failed', 'Proxy storage readiness check failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      res.status(503).json({ status: 'unavailable', service: 'proxy' });
+    }
   });
   app.use('/api', requireInternalToken, adminApiRouter);
   app.use('/internal', requireInternalToken, internalApiRouter);
@@ -94,10 +106,47 @@ function sendInvalidRequestError(req: Request, res: Response, message: string): 
   res.status(400).json({ error: { message, type: 'invalid_request_error' } });
 }
 
-export function startServer(): void {
-  getDb();
-  pruneAllRequestStats();
-  buildApp().listen(config.port, () => {
-    console.log(`[proxy] listening on http://localhost:${config.port}`);
-  });
+export async function startServer(): Promise<Server> {
+  let server: Server;
+  try {
+    await initializeStorage();
+    await pruneAllRequestStats();
+    server = await new Promise<Server>((resolve, reject) => {
+      const listening = buildApp().listen(config.port, () => {
+        console.log(`[proxy] listening on http://localhost:${config.port}`);
+        resolve(listening);
+      });
+      listening.once('error', reject);
+    });
+  } catch (err) {
+    try {
+      await closeStorage();
+    } catch (closeError) {
+      throw new AggregateError([err, closeError], 'Proxy startup and storage cleanup both failed.');
+    }
+    throw err;
+  }
+  const shutdown = () => {
+    const forceCloseTimer = setTimeout(() => {
+      server.closeAllConnections();
+    }, 25_000);
+    forceCloseTimer.unref();
+    server.close((serverError) => {
+      clearTimeout(forceCloseTimer);
+      void closeStorage()
+        .catch((storageError: unknown) => {
+          console.error('[proxy] failed to close storage', storageError);
+          process.exitCode = 1;
+        })
+        .finally(() => {
+          if (serverError) {
+            console.error('[proxy] failed to close HTTP server', serverError);
+            process.exitCode = 1;
+          }
+        });
+    });
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+  return server;
 }

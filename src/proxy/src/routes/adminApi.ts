@@ -48,8 +48,8 @@ adminApiRouter.get('/error-diagnostics/:id', async (req, res) => {
   await sendDiagnosticRecord(req.params.id, res, false);
 });
 
-adminApiRouter.get('/accounts', (req, res) => {
-  const result = listAccounts({
+adminApiRouter.get('/accounts', async (req, res) => {
+  const result = await listAccounts({
     q: stringQuery(req.query.q),
     page: numberQuery(req.query.page),
     pageSize: numberQuery(req.query.pageSize),
@@ -59,8 +59,8 @@ adminApiRouter.get('/accounts', (req, res) => {
   res.json({ ...result, items: result.items.map(toAccountDto) });
 });
 
-adminApiRouter.get('/accounts/:identity', (req, res) => {
-  const account = getAccount(req.params.identity);
+adminApiRouter.get('/accounts/:identity', async (req, res) => {
+  const account = await getAccount(req.params.identity);
   if (!account) {
     res.status(404).json(apiError('account_not_found', 'Proxy account was not found.'));
     return;
@@ -68,8 +68,8 @@ adminApiRouter.get('/accounts/:identity', (req, res) => {
   res.json(toAccountDto(account));
 });
 
-adminApiRouter.delete('/accounts/:identity', (req, res) => {
-  const result = deleteAccount(req.params.identity);
+adminApiRouter.delete('/accounts/:identity', async (req, res) => {
+  const result = await deleteAccount(req.params.identity);
   if (!result) {
     res.status(404).json(apiError('account_not_found', 'Proxy account was not found.'));
     return;
@@ -96,12 +96,12 @@ adminApiRouter.post('/accounts/copilot-oauth-token/import', async (req, res) => 
   }
 });
 
-adminApiRouter.get('/accounts/:identity/request-stats', (req, res) => {
-  res.json(listRequestStats(req.params.identity, readLimit(req.query.limit)));
+adminApiRouter.get('/accounts/:identity/request-stats', async (req, res) => {
+  res.json(await listRequestStats(req.params.identity, readLimit(req.query.limit)));
 });
 
-adminApiRouter.get('/request-stats', (req, res) => {
-  res.json(listRequestStats(undefined, readLimit(req.query.limit)));
+adminApiRouter.get('/request-stats', async (req, res) => {
+  res.json(await listRequestStats(undefined, readLimit(req.query.limit)));
 });
 
 adminApiRouter.post('/accounts/:identity/copilot-oauth/reauthorize', async (req, res) => {
@@ -112,7 +112,7 @@ adminApiRouter.post('/accounts/:identity/copilot-oauth/reauthorize', async (req,
       ssoPassword: typeof body.ssoPassword === 'string' ? body.ssoPassword : undefined,
       ssoType: body.ssoType === 'azure' || body.ssoType === 'custom' ? body.ssoType : undefined,
     });
-    const account = getAccount(req.params.identity);
+    const account = await getAccount(req.params.identity);
     logger.info('reauthorize-copilot-queued', 'Copilot OAuth reauthorization queued a login task', { identity: req.params.identity, copilotOauthStatus: account?.copilotOauthStatus });
     res.json(account ? toAccountDto(account) : undefined);
   } catch (err) {

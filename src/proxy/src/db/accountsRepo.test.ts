@@ -12,30 +12,30 @@ test('only invalidates the credential and authorization attempt that are still c
     saveCopilotOauthToken,
   } = await import('./accountsRepo.js');
 
-  createAccount({ identity: 'alice', ssoUser: 'alice', ghLogin: 'alice_octo' });
-  assert.equal(beginCopilotOauthAuthorization('alice', 'attempt-1'), true);
-  saveCopilotOauthToken('alice', 'attempt-1', 'new-token', 'alice_octo');
+  await createAccount({ identity: 'alice', ssoUser: 'alice', ghLogin: 'alice_octo' });
+  assert.equal(await beginCopilotOauthAuthorization('alice', 'attempt-1'), true);
+  await saveCopilotOauthToken('alice', 'attempt-1', 'new-token', 'alice_octo');
 
-  assert.equal(invalidateCopilotOauthToken('alice', 'stale-token', 'expired'), false);
+  assert.equal(await invalidateCopilotOauthToken('alice', 'stale-token', 'expired'), false);
   assert.deepEqual(
-    pickAuth(getAccount('alice')),
+    pickAuth(await getAccount('alice')),
     { token: 'new-token', status: 'valid' },
   );
-  assert.equal(failCopilotOauthAuthorization('alice', 'stale-attempt'), false);
-  assert.equal(getAccount('alice')?.copilotOauthStatus, 'valid');
+  assert.equal(await failCopilotOauthAuthorization('alice', 'stale-attempt'), false);
+  assert.equal((await getAccount('alice'))?.copilotOauthStatus, 'valid');
 
-  beginCopilotOauthAuthorization('alice', 'attempt-2');
-  assert.equal(invalidateCopilotOauthToken('alice', 'new-token', 'expired'), false);
-  assert.equal(getAccount('alice')?.copilotOauthStatus, 'refreshing');
-  assert.equal(failCopilotOauthAuthorization('alice', 'attempt-2'), true);
-  assert.equal(getAccount('alice')?.copilotOauthStatus, 'failed');
+  await beginCopilotOauthAuthorization('alice', 'attempt-2');
+  assert.equal(await invalidateCopilotOauthToken('alice', 'new-token', 'expired'), false);
+  assert.equal((await getAccount('alice'))?.copilotOauthStatus, 'refreshing');
+  assert.equal(await failCopilotOauthAuthorization('alice', 'attempt-2'), true);
+  assert.equal((await getAccount('alice'))?.copilotOauthStatus, 'failed');
 
-  beginCopilotOauthAuthorization('alice', 'attempt-3');
-  assert.equal(saveCopilotOauthToken('alice', 'attempt-2', 'stale-token', 'alice_octo'), undefined);
-  saveCopilotOauthToken('alice', 'attempt-3', 'new-token', 'alice_octo');
-  assert.equal(invalidateCopilotOauthToken('alice', 'new-token', 'expired'), true);
+  await beginCopilotOauthAuthorization('alice', 'attempt-3');
+  assert.equal(await saveCopilotOauthToken('alice', 'attempt-2', 'stale-token', 'alice_octo'), undefined);
+  await saveCopilotOauthToken('alice', 'attempt-3', 'new-token', 'alice_octo');
+  assert.equal(await invalidateCopilotOauthToken('alice', 'new-token', 'expired'), true);
   assert.deepEqual(
-    pickAuth(getAccount('alice')),
+    pickAuth(await getAccount('alice')),
     { token: undefined, status: 'expired' },
   );
 });

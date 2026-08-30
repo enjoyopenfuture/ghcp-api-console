@@ -268,7 +268,7 @@ test('records an upstream response-stream read failure as a failed request stat'
       pipeAndRecord(upstream, prepared, fakeResponse(), { identity, path: '/responses', model: 'gpt-5' }, context),
       /stream read failed/,
     );
-    const stats = listRequestStats(identity, 10);
+    const stats = await listRequestStats(identity, 10);
     assert.equal(stats.length, 1);
     assert.equal(stats[0]?.success, false);
     assert.match(stats[0]?.failureReason ?? '', /Upstream stream failed/);
@@ -297,7 +297,7 @@ test('persists JSON, SSE, plain-text, and bodyless upstream HTTP failures', asyn
     const listed = await errorDiagnosticsStore.list(1, 10);
     assert.equal(listed.total, 4);
     assert.deepEqual(new Set(listed.items.map((item) => item.status)), new Set([400, 429, 502, 503]));
-    assert.equal(listRequestStats(identity, 10).filter((stat) => !stat.success).length, 4);
+    assert.equal((await listRequestStats(identity, 10)).filter((stat) => !stat.success).length, 4);
   });
 });
 

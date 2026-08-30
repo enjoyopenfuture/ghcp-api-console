@@ -73,7 +73,7 @@ Client
 
 | 配置来源 | 保存位置 | 适合内容 | 生效方式 |
 | --- | --- | --- | --- |
-| 环境变量 / `.env` | 进程环境；不写入业务数据库 | 端口、服务地址、密钥、SQLite/日志/证书路径、认证 header、浏览器静态选项 | 启动时读取，修改后需要重启对应服务。 |
+| 环境变量 / `.env` | 进程环境；不写入业务数据库 | 端口、服务地址、密钥、数据库/日志/证书路径、认证 header、浏览器静态选项 | 启动时读取，修改后需要重启对应服务。 |
 | Console **Settings** | `sso.sqlite` 或 `login.sqlite` | 管理员需要在线调整的限额、并发、超时、重试和调试开关 | 保存后持久化并在当前服务实例立即应用，无需重启。 |
 
 根目录 `.env` 只用于 Docker Compose 的变量插值；只有 `docker-compose.yml` 的 `environment`、`ports`、`volumes` 中明确引用的变量才会传入容器。`src/<service>/.env` 面向单独运行该 workspace 的场景。显式注入的进程环境变量优先于 `.env`，两者都没有时才使用代码默认值。
@@ -129,6 +129,10 @@ cp .env.example .env
 
 | 变量 | 说明 |
 | --- | --- |
+| `STORAGE_DRIVER` | Proxy 存储模式：默认 `sqlite`，多 Proxy Pod 使用 `mysql`。 |
+| `DB_PATH` | `sqlite` 模式的数据库路径；该模式只支持一个 Proxy 实例。 |
+| `MYSQL_URL` | `mysql` 模式必填，指向所有 Proxy Pod 共享的外部 MySQL 8 数据库。 |
+| `MYSQL_CONNECTION_LIMIT` / `MYSQL_SSL_*` | 每个 Proxy Pod 的连接池上限与 MySQL TLS 配置。 |
 | `IDENTITY_HEADER` | 调用方身份 header 名称和是否必填；默认 `X-User-Identity` 必填。 |
 | `IDENTITY_HEADER_REQUIRED` | 调用方身份 header 是否必填；默认 `true`。如果设置为 false，则 Identity header 可选。identity header 为空时，默认使用匿名身份。当前匿名用户为 `default` |
 | `CLAUDE_CODE_OPTIMIZED` | Proxy 的默认 Claude Code 优化模式；代码默认 `false`，Compose 默认和根模板均为 `true`。 |
@@ -137,6 +141,7 @@ cp .env.example .env
 | `PROXY_ERROR_DIAGNOSTICS_DIR` | 人类可读诊断日志目录；Compose 默认 `/data/error-diagnostics`，位于 `proxy-data` volume。 |
 | `PROXY_ERROR_DIAGNOSTICS_REDACT` | 是否脱敏诊断中的敏感 headers 和 JSON 字段；默认 `false`，即保留原始凭据和请求内容。 |
 | `PROXY_ERROR_DIAGNOSTICS_MAX_FILE_MB` / `PROXY_ERROR_DIAGNOSTICS_MAX_FILES` | 轮转上限；默认每文件 `50 MB`、保留 `5` 个文件。 |
+| `PROXY_ERROR_DIAGNOSTICS_SHARED` / `PROXY_INSTANCE_ID` | 多 Proxy Pod 使用 RWX 诊断卷时启用；每个 Pod 使用独立实例目录，管理接口聚合读取。 |
 | `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_SCOPE` | Login 使用的 OpenCode OAuth client 和 Device Flow scope。 |
 | `OPENCODE_VERSION` / `OPENCODE_USER_AGENT` | Login 与 Proxy 请求使用的 OpenCode User-Agent；显式 User-Agent 优先。 |
 | `COPILOT_API_BASE_URL` | Copilot API 地址；GitHub.com 默认 `https://api.githubcopilot.com`。 |
@@ -150,6 +155,8 @@ cp .env.example .env
 各服务完整环境变量表见 [`src/proxy/README.md`](./src/proxy/README.md)、[`src/sso/README.md`](./src/sso/README.md)、[`src/login/README.md`](./src/login/README.md) 和 [`src/console/README.md`](./src/console/README.md)。升级后请在 Console **Settings** 页面确认 SSO/Login 的持久化设置值。
 
 > **升级提示**：首次用新版本打开旧 `proxy.sqlite` 时会保留 identity、SSO/GH login 映射和请求统计，但会不可逆清除旧 VS Code/GitHub token 与短期 Copilot token。升级前先备份数据库，升级后在 Console 逐账号重新授权，或导入通过 OpenCode OAuth client 获取的新 token。
+
+已有 Proxy SQLite 数据迁移到 MySQL 时，使用 [`upgrade/sqlite-to-mysql`](./upgrade/sqlite-to-mysql/README.md) 的显式迁移工具；Proxy 启动不会自动跨数据库搬迁数据。
 
 2. 准备 SAML 证书：
 
@@ -177,11 +184,53 @@ npm run validate:health
 http://localhost:7004
 ```
 
+### 可选：本地 MySQL 8
+
+生产部署的 `docker-compose.yml` 只接收外部 `MYSQL_URL`，不会强制创建 MySQL。需要本地验证时，可用独立 Compose 文件启动测试数据库：
+
+```bash
+npm run mysql:test:up
+```
+
+在宿主机运行 Proxy 或集成测试时使用：
+
+```bash
+MYSQL_TEST_URL='mysql://ghcp_proxy:ghcp_proxy_local@127.0.0.1:3306/ghcp_proxy' npm run test:mysql
+```
+
+其中 `MYSQL_TEST_URL` 是仅对本次命令生效的环境变量，`npm run test:mysql` 会读取它来连接测试数据库。连接串采用常见的 MySQL URI 格式：
+
+```text
+mysql://<用户名>:<密码>@<主机>:<端口>/<数据库名>
+```
+
+本例中，`mysql://` 是固定的协议前缀；`ghcp_proxy` 是用户名；`ghcp_proxy_local` 是密码；`127.0.0.1` 表示宿主机本机；`3306` 是 MySQL 默认端口；最后的 `ghcp_proxy` 是数据库名。格式固定，但这些字段需按实际配置修改；用户名或密码含特殊字符时需要进行 URL 编码。
+
+需要让完整 Compose 栈连接这个 MySQL 时，在 `.env` 设置：
+
+```dotenv
+STORAGE_DRIVER=mysql
+MYSQL_URL=mysql://ghcp_proxy:ghcp_proxy_local@mysql:3306/ghcp_proxy
+```
+
+然后同时加载两个 Compose 文件：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mysql.yml up -d --build --wait
+```
+
+多 Pod/Kubernetes 部署必须使用 `mysql`，并让每个 Proxy Pod 使用同一 `MYSQL_URL`。错误诊断如需在 Console 中全局可见，应给所有 Proxy Pod 挂载同一个 RWX PVC，设置 `PROXY_ERROR_DIAGNOSTICS_SHARED=true`，并通过 Downward API 把 Pod 名注入 `PROXY_INSTANCE_ID`。本次横向扩展仅覆盖 Proxy；仍使用 SQLite/文件状态的 SSO、Login 和 Console 必须保持单副本。
+
 首次访问会创建本地控制台管理员。之后可以在控制台管理 SSO 用户、EMU 同步、Proxy 账号、登录任务、Copilot OAuth 重授权/导入、请求统计和 Error Diagnostics；管理员可在 **Settings** 修改自己的 Console 密码。
 
 > **SSO 改密与自动登录**：SSO 只保存密码哈希，不能把修改后的任意密码提供给 Login。若新密码不是当前 `SSO_DEFAULT_USER_PASSWORD` 或该用户的 `ssoUser`，后续自动初始化无法取得密码；请在 Console 的 **Reauthorize Copilot OAuth** 中手动输入新密码。Login 仅使用该次请求提供的密码执行任务，不会把密码保存到任务历史。
 
 ## 调用 API
+
+设置API_KEY环境变量
+```
+export API_KEY=change-me-proxy-api-key
+```
 
 `proxy` 默认监听 `3000`，公共接口需要：
 

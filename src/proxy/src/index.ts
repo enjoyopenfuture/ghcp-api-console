@@ -1,3 +1,6 @@
 import { startServer } from './server.js';
 
-startServer();
+void startServer().catch((err: unknown) => {
+  console.error('[proxy] failed to start', err);
+  process.exitCode = 1;
+});

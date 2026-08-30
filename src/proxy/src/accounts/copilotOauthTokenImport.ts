@@ -46,7 +46,7 @@ async function importCopilotOauthTokenRow(row: ImportRow): Promise<ImportCopilot
   try {
     const ssoUser = await getSsoUser(row.name);
     await validateCopilotOauthToken(row.name, row.copilotOauthToken);
-    const account = importCopilotOauthToken({
+    const account = await importCopilotOauthToken({
       identity: row.name,
       ssoUser: ssoUser.ssoUser,
       ghLogin: ssoUser.ghLogin ?? row.name,

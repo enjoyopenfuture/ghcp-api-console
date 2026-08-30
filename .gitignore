@@ -20,9 +20,13 @@ src/**/logs/
 .env
 certs/
 .keys
-docs
+docs/*
 
 guidance/outline.md
 guidance-draft.md
 tmp.md
 curl.http
+
+
+!docs/codebase-overview.md
+!docs/repo-map.md

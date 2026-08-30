@@ -3,31 +3,21 @@ import test from 'node:test';
 
 test('deletes one Proxy account and its request stats without affecting other identities', async () => {
   process.env.DB_PATH = ':memory:';
-  const { getDb } = await import('./connection.js');
   const { createAccount, deleteAccount, getAccount } = await import('./accountsRepo.js');
+  const { listRequestStats, recordRequestStat } = await import('./requestStatsRepo.js');
 
-  createAccount({ identity: 'alice', ssoUser: 'alice', ghLogin: 'alice_emu' });
-  createAccount({ identity: 'bob', ssoUser: 'bob', ghLogin: 'bob_emu' });
-  const insertStat = getDb().prepare(`
-    INSERT INTO proxy_request_stats (id, identity, requested_at, path, success)
-    VALUES (?, ?, ?, '/v1/models', 1)
-  `);
-  insertStat.run('alice-request', 'alice', '2026-07-23T00:00:00.000Z');
-  insertStat.run('bob-request', 'bob', '2026-07-23T00:00:00.000Z');
+  await createAccount({ identity: 'alice', ssoUser: 'alice', ghLogin: 'alice_emu' });
+  await createAccount({ identity: 'bob', ssoUser: 'bob', ghLogin: 'bob_emu' });
+  await recordRequestStat({ identity: 'alice', path: '/v1/models', success: true });
+  await recordRequestStat({ identity: 'bob', path: '/v1/models', success: true });
 
-  assert.deepEqual(deleteAccount('alice'), {
+  assert.deepEqual(await deleteAccount('alice'), {
     identity: 'alice',
     deletedRequestStats: 1,
   });
-  assert.equal(getAccount('alice'), undefined);
-  assert.notEqual(getAccount('bob'), undefined);
-  assert.equal(
-    (getDb().prepare('SELECT COUNT(*) AS count FROM proxy_request_stats WHERE identity = ?').get('alice') as { count: number }).count,
-    0,
-  );
-  assert.equal(
-    (getDb().prepare('SELECT COUNT(*) AS count FROM proxy_request_stats WHERE identity = ?').get('bob') as { count: number }).count,
-    1,
-  );
-  assert.equal(deleteAccount('alice'), undefined);
+  assert.equal(await getAccount('alice'), undefined);
+  assert.notEqual(await getAccount('bob'), undefined);
+  assert.equal((await listRequestStats('alice')).length, 0);
+  assert.equal((await listRequestStats('bob')).length, 1);
+  assert.equal(await deleteAccount('alice'), undefined);
 });

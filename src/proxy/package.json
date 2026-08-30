@@ -8,6 +8,7 @@
     "start:prod": "node dist/index.js",
     "pretest": "npm --workspace @ghcp/shared run build",
     "test": "tsx --test src/accounts/*.test.ts src/clients/*.test.ts src/copilot/*.test.ts src/db/*.test.ts src/diagnostics/*.test.ts src/routes/*.test.ts",
+    "test:mysql": "tsx --test src/db/mysqlStorage.integration.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc"
   },

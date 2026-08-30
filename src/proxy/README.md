@@ -10,7 +10,7 @@ Proxy 位于客户端与 GitHub Copilot 后端之间，负责：
 - 用本地 API Key 保护公共代理接口，用内部 Token 保护管理/服务间接口。
 - 按用户身份（默认请求头 `X-User-Identity`）维护账号、Token 状态和请求统计。
 - 分别连接 SSO 服务与 Login 服务：未知身份会触发 SSO 用户确保、EMU 同步，并由 Proxy 创建 Login 任务；手动重新授权 Copilot OAuth 也会创建 Login 任务。
-- 通过 SQLite 持久化账号、Copilot OAuth token 与最近请求统计。
+- 单实例默认通过 SQLite 持久化账号、Copilot OAuth token 与最近请求统计；多实例可切换到共享 MySQL 8。
 - 对 Copilot 上游 HTTP、网络和流读取错误保存完整诊断现场，并通过 Console 查看、下载或清空。
 
 ## 2. 核心功能
@@ -50,6 +50,8 @@ npm --workspace @ghcp/proxy run start
 ```bash
 curl http://localhost:3000/healthz
 # {"status":"ok","service":"proxy"}
+curl http://localhost:3000/readyz
+# {"status":"ok","service":"proxy","storage":"sqlite"}
 ```
 
 ### 3.2 本地构建/运行
@@ -81,7 +83,13 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 | --- | --- | --- | --- |
 | `PORT` | `3000` / `3000` | 否 | HTTP 监听端口。 |
 | `LOG_LEVEL` | `info`（shared logger 默认）/ `info` | 否 | 日志级别：`debug`、`info`、`warn`、`error`；无效值回退 `info`。 |
-| `DB_PATH` | `./data/proxy.sqlite` / 同 | 否 | SQLite 文件路径；启动时自动创建目录、开启 WAL。 |
+| `STORAGE_DRIVER` | `sqlite` / `sqlite` | 否 | `sqlite` 或 `mysql`；SQLite 只支持单实例，MySQL 用于多 Pod。 |
+| `DB_PATH` | `./data/proxy.sqlite` / 同 | SQLite 模式 | SQLite 文件路径；启动时自动创建目录、开启 WAL。 |
+| `MYSQL_URL` | 未设置 / 空 | MySQL 模式 | 所有 Proxy Pod 共享的 MySQL 8 连接 URL。 |
+| `MYSQL_CONNECTION_LIMIT` | `10` / `10` | 否 | 每个 Proxy Pod 的 MySQL 连接池上限。 |
+| `MYSQL_SSL_MODE` | `disabled` / `disabled` | 否 | `disabled`、`required`（加密但不验证 CA）或 `verify-ca`；远程生产数据库应优先使用 `verify-ca`。 |
+| `MYSQL_SSL_CA_PATH` | 未设置 / 空 | `verify-ca` 模式 | MySQL CA 证书文件路径。 |
+| `IDENTITY_INIT_LEASE_SECONDS` | `900` / `900` | 否 | 多 Pod 首次初始化 identity 的数据库租约时间。 |
 | `API_KEY` | 空字符串 / `change-me` | 是 | 公共代理接口的本地 API Key；为空时公共接口无法通过鉴权。 |
 | `IDENTITY_HEADER` | `X-User-Identity` / 同 | 否 | 公共请求中用于绑定 proxy 账号的请求头名。 |
 | `IDENTITY_HEADER_REQUIRED` | `true` / `true` | 否 | 为 `false` 时缺失身份头会使用 `default`。 |
@@ -96,6 +104,8 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 | `PROXY_ERROR_DIAGNOSTICS_REDACT` | `false` / `false` | 否 | 是否脱敏敏感 headers 和 JSON 字段。默认不脱敏，会保存凭据与完整用户内容。 |
 | `PROXY_ERROR_DIAGNOSTICS_MAX_FILE_MB` | `50` / `50` | 否 | 单个诊断文件目标上限 MB；必须为正整数。超大单条记录保持完整。 |
 | `PROXY_ERROR_DIAGNOSTICS_MAX_FILES` | `5` / `5` | 否 | 包含当前文件在内的最大轮转文件数；必须为正整数。 |
+| `PROXY_ERROR_DIAGNOSTICS_SHARED` | `false` / `false` | 否 | 在多 Pod 共用 RWX 根目录时启用实例隔离写入和聚合读取。 |
+| `PROXY_INSTANCE_ID` | `HOSTNAME` / 空 | 共享诊断模式 | 当前 Pod 的安全目录标识；Kubernetes 建议通过 Downward API 注入 Pod 名。 |
 | `COPILOT_API_BASE_URL` | `https://api.githubcopilot.com` / 同 | 否 | GitHub.com Copilot API base URL。 |
 | `OPENCODE_VERSION` | `1.0.0` / `1.18.4` | 否 | 生成 `User-Agent: opencode/<version>`。 |
 | `OPENCODE_USER_AGENT` | 未设置 / 未设置 | 否 | 显式覆盖完整 User-Agent；非空时优先于 `OPENCODE_VERSION`。 |
@@ -103,7 +113,7 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 
 ### `.env` 与 runtime Settings
 
-Proxy 当前没有 runtime settings 表、Settings 页面字段或 `/api/settings/runtime` 接口；上表全部是启动期环境变量，修改后需要重启 Proxy。密钥、服务地址和数据库路径不会写入 SQLite。
+Proxy 当前没有 runtime settings 表、Settings 页面字段或 `/api/settings/runtime` 接口；上表全部是启动期环境变量，修改后需要重启 Proxy。密钥、服务地址和数据库连接不会写入业务数据库。
 
 `REQUEST_STATS_PER_ACCOUNT_LIMIT` 是 env-only 的数据保留策略：每次写入统计后清理当前 identity 的旧记录，服务启动时还会对所有 identity 清理一次。代码、Compose fallback、根 `.env.example` 和 `src/proxy/.env.example` 均默认为 `2`。该值必须是正整数。
 
@@ -243,9 +253,9 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 
 ## 6. 数据结构
 
-### 6.1 SQLite 表
+### 6.1 SQLite / MySQL 表
 
-`src/db/connection.ts` 会按 `DB_PATH` 创建数据库目录，打开 SQLite，设置 `journal_mode = WAL` 和 `foreign_keys = ON`，再运行迁移。
+`src/db/connection.ts` 根据 `STORAGE_DRIVER` 创建 SQLite provider 或 MySQL 连接池。SQLite 会按 `DB_PATH` 创建目录、启用 WAL 和外键；MySQL 要求 8.x/InnoDB，并通过 advisory lock 保证多个 Pod 并发启动时只有一个实例执行 schema migration。两种 provider 暴露相同的异步账号、统计和初始化租约语义。
 
 #### `proxy_accounts`
 
@@ -276,9 +286,13 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 
 索引：`idx_proxy_request_stats_identity_time(identity, requested_at DESC)`。每次写入后会按 `REQUEST_STATS_PER_ACCOUNT_LIMIT` 清理该账号旧记录；服务启动时也会清理一次。
 
+`proxy_identity_initializations` 保存带过期时间和唯一 claim ID 的初始化租约。未知 identity 在调用 SSO、SCIM/seat 和 Login 之前必须先取得租约，因此多个 Proxy Pod 不会重复执行外部副作用；旧 Pod 也不能释放新 Pod 的 claim。
+
+SQLite 是默认的单 Pod 模式，不能把同一个 SQLite 文件以 RWX 方式提供给多个 Proxy Pod。MySQL 模式不包含 identity/token 缓存，每个请求直接按主键读取共享数据库。已有 SQLite 数据切换到 MySQL 使用仓库根目录 `upgrade/sqlite-to-mysql` 的显式工具。
+
 ### 6.2 错误诊断文本日志
 
-诊断不写入 SQLite。`ErrorDiagnosticsStore` 串行化 append/rotate/clear，确保并发错误不会交错写入；列表按最新记录优先扫描轮转文件，并忽略进程异常退出留下的不完整记录。每条记录使用明确的 BEGIN/END 标记，正文包含：
+诊断不写入 SQLite/MySQL。单 Pod 模式由 `ErrorDiagnosticsStore` 串行化 append/rotate/clear。共享模式要求所有 Proxy Pod 挂载同一个 RWX 根目录，每个 `PROXY_INSTANCE_ID` 只写自己的子目录，列表与详情跨实例聚合，并使用共享 clear marker 避免删除其他 Pod 正在写入的文件。两种模式都会忽略进程异常退出留下的不完整记录。每条记录使用明确的 BEGIN/END 标记，正文包含：
 
 - `failureKind`: `http`、`fetch` 或 `stream`；
 - identity、兼容 API path、model 和时间；
@@ -331,7 +345,7 @@ src/proxy/
     ├── clients/                 # SSO/Login 服务 JSON client
     ├── accounts/                # Copilot OAuth token 验证与 CSV 导入
     ├── diagnostics/             # 错误现场构造、人类可读格式、轮转文本 store 与测试
-    └── db/                      # SQLite 连接、迁移、accounts/stats repo
+    └── db/                      # SQLite/MySQL provider、迁移、accounts/stats repo
 ```
 
 `src/packages/shared/src/contracts.ts` 和 `api.ts` 定义 Proxy 与其他服务共享的 DTO、分页、批处理和错误结构。
@@ -343,6 +357,6 @@ src/proxy/
 - 排查转发失败：先从控制台错误摘要取得 `diagnosticId`，在 Console **Error Diagnostics** 查看/下载现场，再看 `compatible.ts` 的 `handleForward()`、`forwardAuthenticated()` 和 `copilotClient.assertModelSupportsPath()`。
 - 排查 Claude Code：确认 `CLAUDE_CODE_OPTIMIZED=true`，再看 `claudeCodeCompat.ts` 的 body 预处理、token count fallback 和 Files/WebSearch 错误适配。
 - 排查数据：优先查看管理接口 `/api/accounts`、`/api/request-stats`；不要在响应中暴露数据库内的原始 Token。
-- 扩展新 Copilot 路径时，至少同步更新 `COPILOT_FORWARD_PATHS`、`compatible.ts` 路由、模型路径推断、`ProxyRequestStatDto.path`、SQLite 统计语义和本文档。
+- 扩展新 Copilot 路径时，至少同步更新 `COPILOT_FORWARD_PATHS`、`compatible.ts` 路由、模型路径推断、`ProxyRequestStatDto.path`、SQLite/MySQL 统计语义和本文档。
 - 新增配置时，同时更新 `config.ts`、`src/proxy/.env.example` 和本 README；若配置影响其他服务，也要检查 shared contracts 或调用客户端。
 - 本模块提供 `test` 脚本；改代码后运行 `npm --workspace @ghcp/proxy run test` 和 `npm --workspace @ghcp/proxy run typecheck`，涉及 shared 类型时也运行 shared typecheck。

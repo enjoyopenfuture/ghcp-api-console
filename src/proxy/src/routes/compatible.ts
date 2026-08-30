@@ -1,7 +1,8 @@
 import { TextDecoder } from 'node:util';
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { apiError } from '@ghcp/shared';
-import { recordRequestStat } from '../db/requestStatsRepo.js';
+import { recordRequestStat as persistRequestStat } from '../db/requestStatsRepo.js';
+import { Logger } from '../logger.js';
 import {
   DiagnosticBodyCapture,
   createErrorDiagnosticContext,
@@ -36,6 +37,7 @@ import { resolveClaudeCodeOptimized } from './claudeCodeMode.js';
 import { resolveRequestIntent } from './requestIntent.js';
 
 export const compatibleRouter = Router();
+const requestStatsLogger = new Logger('request-stats');
 
 interface UsageStats {
   inputTokens?: number;
@@ -58,7 +60,7 @@ compatibleRouter.get('/v1/models', async (req, res) => {
     const diagnostics = createErrorDiagnosticContext(req, identity, '/v1/models');
     const models = await listModels(copilot, { useCache, diagnostics });
     const visibleModels = claudeCodeOptimized ? models.filter((m) => modelSupportsPath(m, '/v1/messages')) : models;
-    recordRequestStat({ identity, path: '/v1/models', success: true });
+    await recordRequestStat({ identity, path: '/v1/models', success: true });
     if (claudeCodeOptimized) {
       const data = visibleModels.map(toClaudeCodeModel);
       res.json({
@@ -71,8 +73,8 @@ compatibleRouter.get('/v1/models', async (req, res) => {
     }
     res.json({ object: 'list', data: visibleModels.map((m) => ({ object: 'model', owned_by: 'github-copilot', ...m })) });
   } catch (err) {
-    invalidateUnauthorizedAuth(identity, accessToken, err);
-    recordRequestStat({ identity, path: '/v1/models', success: false, failureReason: errorMessage(err) });
+    await invalidateUnauthorizedAuth(identity, accessToken, err);
+    await recordRequestStat({ identity, path: '/v1/models', success: false, failureReason: errorMessage(err) });
     sendCompatibleError(req, res, err);
   }
 });
@@ -131,7 +133,7 @@ async function handleForward(req: Request, res: Response, path: CopilotApiPath):
     if (!requestedModel) throw new CopilotModelPathError('Request body must include a string "model".');
     const prepared = prepareForward(req, path, body, claudeCodeOptimized);
     if (prepared.preflightError) {
-      recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: prepared.preflightError.message });
+      await recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: prepared.preflightError.message });
       sendAnthropicError(res, prepared.preflightError.status, prepared.preflightError.type, prepared.preflightError.message);
       return;
     }
@@ -141,7 +143,7 @@ async function handleForward(req: Request, res: Response, path: CopilotApiPath):
     await pipeAndRecord(upstream.response, upstream.request, res, { identity, path, model }, diagnostics, prepared.pipeOptions);
   } catch (err) {
     if (!(err instanceof HandledUpstreamStreamError)) {
-      recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: errorMessage(err) });
+      await recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: errorMessage(err) });
     }
     const responseError = err instanceof HandledUpstreamStreamError ? err.cause : err;
     if (!res.headersSent) sendCompatibleError(req, res, responseError);
@@ -163,7 +165,7 @@ async function handleCountTokens(req: Request, res: Response, claudeCodeOptimize
     if (!requestedModel) throw new CopilotModelPathError('Request body must include a string "model".');
     const prepared = prepareForward(req, path, body, claudeCodeOptimized);
     if (prepared.preflightError) {
-      recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: prepared.preflightError.message });
+      await recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: prepared.preflightError.message });
       sendAnthropicError(res, prepared.preflightError.status, prepared.preflightError.type, prepared.preflightError.message);
       return;
     }
@@ -173,14 +175,14 @@ async function handleCountTokens(req: Request, res: Response, claudeCodeOptimize
     if (isTokenCountFallbackStatus(upstream.response.status)) {
       await recordTokenCountFallbackFailure(upstream.response, upstream.request, diagnostics);
       const inputTokens = estimateInputTokens(prepared.body);
-      recordRequestStat({ identity, path, model, success: true, inputTokens });
+      await recordRequestStat({ identity, path, model, success: true, inputTokens });
       res.json({ input_tokens: inputTokens });
       return;
     }
     await pipeAndRecord(upstream.response, upstream.request, res, { identity, path, model }, diagnostics, prepared.pipeOptions);
   } catch (err) {
     if (!(err instanceof HandledUpstreamStreamError)) {
-      recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: errorMessage(err) });
+      await recordRequestStat({ identity, path, model: requestedModel, success: false, failureReason: errorMessage(err) });
     }
     const responseError = err instanceof HandledUpstreamStreamError ? err.cause : err;
     if (!res.headersSent) sendCompatibleError(req, res, responseError);
@@ -246,7 +248,7 @@ async function forwardAuthenticated(
   try {
     await assertModelSupportsPath(copilot, path, model, diagnostics);
   } catch (err) {
-    invalidateUnauthorizedAuth(identity, copilot.accessToken, err);
+    await invalidateUnauthorizedAuth(identity, copilot.accessToken, err);
     throw err;
   }
   const request = prepareCopilotRequest(copilot, path, body, options);
@@ -258,7 +260,7 @@ async function forwardAuthenticated(
     throw err;
   }
   if (response.status === 401) {
-    copilotAuthManager.invalidate(identity, copilot.accessToken);
+    await copilotAuthManager.invalidate(identity, copilot.accessToken);
   }
   return { response, request };
 }
@@ -277,7 +279,7 @@ export async function pipeAndRecord(
   if (!upstream.body) {
     if (!upstream.ok) await recordHttpFailure(diagnostics, upstreamRequest, upstream);
     res.end();
-    recordRequestStat({ ...stat, success: upstream.ok, failureReason: upstream.ok ? undefined : `HTTP ${upstream.status}` });
+    await recordRequestStat({ ...stat, success: upstream.ok, failureReason: upstream.ok ? undefined : `HTTP ${upstream.status}` });
     return;
   }
   const shouldBuffer = contentType.includes('application/json')
@@ -295,12 +297,12 @@ export async function pipeAndRecord(
     const text = body.buffer.toString('utf8');
     if (options.claudeCodeOptimized && shouldTranslateWebSearchError(upstream.status, text, options.requestBody)) {
       sendAnthropicError(res, 400, 'not_supported', webSearchUnsupportedMessage(options.requestBody));
-      recordRequestStat({ ...stat, success: false, failureReason: `HTTP ${upstream.status}` });
+      await recordRequestStat({ ...stat, success: false, failureReason: `HTTP ${upstream.status}` });
       return;
     }
     res.send(body.buffer);
     const usage = parseUsage(text);
-    recordRequestStat({
+    await recordRequestStat({
       ...stat,
       success: upstream.ok,
       failureReason: upstream.ok ? undefined : `HTTP ${upstream.status}`,
@@ -343,7 +345,7 @@ export async function pipeAndRecord(
   const capturedBody = capture.result(true);
   if (!upstream.ok) await recordHttpFailure(diagnostics, upstreamRequest, upstream, capturedBody);
   res.end();
-  recordRequestStat({
+  await recordRequestStat({
     ...stat,
     success: upstream.ok,
     failureReason: upstream.ok ? undefined : `HTTP ${upstream.status}`,
@@ -411,7 +413,7 @@ async function handleStreamReadFailure(
   err: ResponseStreamReadError,
 ): Promise<void> {
   const diagnosticId = await recordStreamFailure(diagnostics, upstreamRequest, upstream, err.capture, err.cause);
-  recordRequestStat({
+  await recordRequestStat({
     ...stat,
     success: false,
     failureReason: `Upstream stream failed (${diagnosticId}): ${errorMessage(err.cause)}`,
@@ -697,8 +699,20 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function invalidateUnauthorizedAuth(identity: string, accessToken: string | undefined, err: unknown): void {
+async function recordRequestStat(input: Parameters<typeof persistRequestStat>[0]): Promise<void> {
+  try {
+    await persistRequestStat(input);
+  } catch (err) {
+    requestStatsLogger.error('write-failed', 'Failed to persist Proxy request statistics', {
+      identity: input.identity,
+      path: input.path,
+      error: errorMessage(err),
+    });
+  }
+}
+
+async function invalidateUnauthorizedAuth(identity: string, accessToken: string | undefined, err: unknown): Promise<void> {
   if (accessToken && err instanceof CopilotApiError && err.status === 401) {
-    copilotAuthManager.invalidate(identity, accessToken);
+    await copilotAuthManager.invalidate(identity, accessToken);
   }
 }

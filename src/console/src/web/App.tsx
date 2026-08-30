@@ -26,7 +26,7 @@ import { Dialog } from './components/ui/dialog.js';
 import { Input } from './components/ui/input.js';
 import { Textarea } from './components/ui/textarea.js';
 import { Tooltip } from './components/ui/tooltip.js';
-import { formatDate, formatNumber, formatRelativeDate, statusTone, tokenTotal } from './lib/format.js';
+import { formatDate, formatNumber, statusTone, tokenTotal } from './lib/format.js';
 
 interface SetupState {
   initialized: boolean;
@@ -427,7 +427,7 @@ function UsersPage(props: { notify: Notify }) {
                   <Td>{user.ghLogin ?? '-'}</Td>
                   <Td><Badge tone={statusTone(user.emuStatus)}>{user.emuStatus}</Badge></Td>
                   <Td><CopilotSeatCell user={user} /></Td>
-                  <Td title={formatDate(user.updatedAt)}>{formatRelativeDate(user.updatedAt)}</Td>
+                  <Td>{formatDate(user.updatedAt)}</Td>
                   <Td><Button variant="secondary" onClick={() => setEditing(user)}>Edit</Button></Td>
                 </tr>
               ))}
