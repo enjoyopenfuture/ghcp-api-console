@@ -8,6 +8,7 @@
 > 获得 GitHub Copilot Token的部分参考了 OpenCode 项目
 
 > 管理员的配置手册: ([guidance/guidance.md](./guidance/guidance.md))
+> 网络配置的说明: ([guidance/network-deployment.md](./guidance/network-deployment.md))
 
 ## 背景
 
