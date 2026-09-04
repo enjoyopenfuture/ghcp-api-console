@@ -37,7 +37,7 @@ flowchart LR
 
 | GitHub EMU SAML 配置项 | 取值 | 说明 |
 | --- | --- | --- |
-| Sign on URL | `<SSO_PUBLIC_BASE_URL>/sso` | 登录时 GitHub 让浏览器跳转到的地址，即图中 gh.com 下方标注的 `Sso:7001` |
+| Sign on URL | `<SSO_PUBLIC_BASE_URL>/sso` | 登录时 GitHub 让浏览器跳转到的地址 |
 | Issuer | `<SSO_PUBLIC_BASE_URL>/metadata` | sso 服务作为 IdP 的标识 |
 | Public certificate | sso 的 SAML 签名证书 | 与网络无关，此处仅列出 |
 
