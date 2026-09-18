@@ -5,6 +5,7 @@ export interface ProxyConfig {
   storageDriver: 'sqlite' | 'mysql';
   dbPath: string;
   mysqlUrl?: string;
+  mysqlAutoMigrate: boolean;
   mysqlConnectionLimit: number;
   mysqlSslMode: 'disabled' | 'required' | 'verify-ca';
   mysqlSslCaPath?: string;
@@ -35,6 +36,7 @@ export const config: ProxyConfig = {
   storageDriver: readStorageDriver(process.env.STORAGE_DRIVER),
   dbPath: process.env.DB_PATH ?? './data/proxy.sqlite',
   mysqlUrl: readOptionalString(process.env.MYSQL_URL),
+  mysqlAutoMigrate: readBoolean(process.env.MYSQL_AUTO_MIGRATE, true),
   mysqlConnectionLimit: readPositiveInteger(process.env.MYSQL_CONNECTION_LIMIT, 10),
   mysqlSslMode: readMysqlSslMode(process.env.MYSQL_SSL_MODE),
   mysqlSslCaPath: readOptionalString(process.env.MYSQL_SSL_CA_PATH),

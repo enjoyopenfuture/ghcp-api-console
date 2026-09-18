@@ -4,10 +4,11 @@ import { createPool, type RowDataPacket } from 'mysql2/promise';
 import { MysqlStorage } from './mysqlStorage.js';
 
 const mysqlUrl = process.env.MYSQL_TEST_URL;
+const mysqlRuntimeUrl = process.env.MYSQL_TEST_RUNTIME_URL;
 
 test('provides MySQL repository parity and cross-instance claims', {
   skip: mysqlUrl ? false : 'Set MYSQL_TEST_URL to run MySQL integration tests.',
-}, async () => {
+}, async (t) => {
   const firstPool = createPool({
     uri: mysqlUrl!,
     connectionLimit: 3,
@@ -36,14 +37,28 @@ test('provides MySQL repository parity and cross-instance claims', {
     dateStrings: true,
     decimalNumbers: true,
   });
+  const runtimePool = createPool({
+    uri: mysqlRuntimeUrl ?? mysqlUrl!,
+    connectionLimit: 3,
+    timezone: 'Z',
+    dateStrings: true,
+    decimalNumbers: true,
+  });
   const first = new MysqlStorage(firstPool, 2);
   const second = new MysqlStorage(secondPool, 2);
   const third = new MysqlStorage(thirdPool, 2);
   const fourth = new MysqlStorage(fourthPool, 2);
+  const runtime = new MysqlStorage(runtimePool, 2, false);
   const contenders = [first, second, third, fourth];
   try {
     await Promise.all(contenders.map((storage) => storage.initialize()));
     await clearTestData(firstPool);
+    const migrationConnection = t.mock.method(runtimePool, 'getConnection', async () => {
+      assert.fail('Skip mode must not acquire a migration connection.');
+    });
+    await runtime.initialize();
+    assert.equal(migrationConnection.mock.callCount(), 0);
+    migrationConnection.mock.restore();
 
     await first.createAccount({ identity: 'Alice', ssoUser: 'alice', ghLogin: 'alice_octo' });
     assert.equal((await second.getAccount('Alice'))?.ghLogin, 'alice_octo');
@@ -117,9 +132,22 @@ test('provides MySQL repository parity and cross-instance claims', {
       deletedRequestStats: 2,
     });
     assert.equal(await first.getAccount('Alice'), undefined);
+
+    await runtime.createAccount({ identity: 'runtime-user', ssoUser: 'runtime-user' });
+    assert.equal((await runtime.getAccount('runtime-user'))?.ssoUser, 'runtime-user');
+    assert.equal(await runtime.beginCopilotOauthAuthorization('runtime-user', 'runtime-attempt'), true);
+    await runtime.recordRequestStat({ identity: 'runtime-user', path: '/v1/models', success: true });
+    assert.equal((await runtime.listRequestStats('runtime-user')).length, 1);
+    await runtime.pruneAllRequestStats();
+    assert.equal(await runtime.claimIdentityInitialization('runtime-user', 'runtime-claim', 60), true);
+    assert.equal(await runtime.releaseIdentityInitialization('runtime-user', 'runtime-claim'), true);
+    assert.deepEqual(await runtime.deleteAccount('runtime-user'), {
+      identity: 'runtime-user',
+      deletedRequestStats: 1,
+    });
   } finally {
     await clearTestData(firstPool).catch(() => undefined);
-    await Promise.all(contenders.map((storage) => storage.close()));
+    await Promise.all([...contenders, runtime].map((storage) => storage.close()));
   }
 });
 

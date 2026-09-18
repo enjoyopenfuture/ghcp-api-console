@@ -86,6 +86,7 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 | `STORAGE_DRIVER` | `sqlite` / `sqlite` | 否 | `sqlite` 或 `mysql`；SQLite 只支持单实例，MySQL 用于多 Pod。 |
 | `DB_PATH` | `./data/proxy.sqlite` / 同 | SQLite 模式 | SQLite 文件路径；启动时自动创建目录、开启 WAL。 |
 | `MYSQL_URL` | 未设置 / 空 | MySQL 模式 | 所有 Proxy Pod 共享的 MySQL 8 连接 URL。 |
+| `MYSQL_AUTO_MIGRATE` | `true` / `true` | 否 | 仅影响 MySQL；`false` 时跳过自动迁移，仅检查三张必需业务表存在且可读，不访问迁移历史。 |
 | `MYSQL_CONNECTION_LIMIT` | `10` / `10` | 否 | 每个 Proxy Pod 的 MySQL 连接池上限。 |
 | `MYSQL_SSL_MODE` | `disabled` / `disabled` | 否 | `disabled`、`required`（加密但不验证 CA）或 `verify-ca`；远程生产数据库应优先使用 `verify-ca`。 |
 | `MYSQL_SSL_CA_PATH` | 未设置 / 空 | `verify-ca` 模式 | MySQL CA 证书文件路径。 |
@@ -255,7 +256,23 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 
 ### 6.1 SQLite / MySQL 表
 
-`src/db/connection.ts` 根据 `STORAGE_DRIVER` 创建 SQLite provider 或 MySQL 连接池。SQLite 会按 `DB_PATH` 创建目录、启用 WAL 和外键；MySQL 要求 8.x/InnoDB，并通过 advisory lock 保证多个 Pod 并发启动时只有一个实例执行 schema migration。两种 provider 暴露相同的异步账号、统计和初始化租约语义。
+`src/db/connection.ts` 根据 `STORAGE_DRIVER` 创建 SQLite provider 或 MySQL 连接池。SQLite 会按 `DB_PATH` 创建目录、启用 WAL 和外键；MySQL 要求 8.x/InnoDB，默认自动迁移，并通过 advisory lock 保证多个 Pod 并发启动时只有一个实例执行 schema migration。两种 provider 暴露相同的异步账号、统计和初始化租约语义。
+
+#### MySQL 低权限运行
+
+当运行账号没有 `CREATE`、`ALTER` 权限时，由管理员提前准备好与当前版本匹配的业务表，并向 Proxy 容器实际注入以下环境变量：
+
+```dotenv
+STORAGE_DRIVER=mysql
+MYSQL_URL=mysql://proxy_runtime:change-me@mysql:3306/proxy
+MYSQL_AUTO_MIGRATE=false
+```
+
+关闭自动迁移后，启动只通过 `SELECT 1 FROM <table> LIMIT 0` 检查 `proxy_accounts`、`proxy_request_stats`、`proxy_identity_initializations` 三张表存在且当前账号可读；空表可以通过。不会执行建表、改表、迁移锁或任何 `schema_migrations` 访问。`schema_migrations` 只记录自动迁移历史，新环境直接建好业务表即可，不要求有该表或迁移完成记录，也不要求运行账号拥有它的权限。
+
+缺少任一业务表或无读取权限时，Proxy 会在监听 HTTP 端口之前报错，提示管理员处理，不自动修复。检查不核对字段、类型、索引或写权限；管理员需要保证实际表结构与当前应用版本匹配，可按当前版本建表，也可使用 `src/db/mysqlMigrations.ts` 中的 `runMysqlMigrations` 完成初始化或升级。
+
+运行账号仍需对三张业务表具备 `SELECT`、`INSERT`、`UPDATE`、`DELETE` 权限；启动时仍会清理请求统计，因此该开关不是只读模式。表检查在存储初始化时完成并缓存，之后 `/readyz` 继续检查连接，不持续检查表结构。配置修改后需要重启 Proxy；未设置或为 `true` 时保持自动迁移，SQLite 不受此开关影响。
 
 #### `proxy_accounts`
 
@@ -360,3 +377,4 @@ src/proxy/
 - 扩展新 Copilot 路径时，至少同步更新 `COPILOT_FORWARD_PATHS`、`compatible.ts` 路由、模型路径推断、`ProxyRequestStatDto.path`、SQLite/MySQL 统计语义和本文档。
 - 新增配置时，同时更新 `config.ts`、`src/proxy/.env.example` 和本 README；若配置影响其他服务，也要检查 shared contracts 或调用客户端。
 - 本模块提供 `test` 脚本；改代码后运行 `npm --workspace @ghcp/proxy run test` 和 `npm --workspace @ghcp/proxy run typecheck`，涉及 shared 类型时也运行 shared typecheck。
+- MySQL 集成测试使用 `MYSQL_TEST_URL` 并通过 `npm --workspace @ghcp/proxy run test:mysql` 执行；该账号需要迁移权限。可额外设置 `MYSQL_TEST_RUNTIME_URL`，指向同一测试库的低权限账号，仅授予三张业务表的读写权限、不授予 `CREATE`、`ALTER` 或迁移历史表权限，以验证关闭迁移后的初始化和业务操作。测试会清理三张业务表，必须使用专用测试库，不能连接业务数据库。

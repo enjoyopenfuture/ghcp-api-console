@@ -13,7 +13,7 @@ import {
   type PageResponse,
   type ProxyRequestStatDto,
 } from '@ghcp/shared';
-import { runMysqlMigrations } from './mysqlMigrations.js';
+import { runMysqlMigrations, validateMysqlTables } from './mysqlMigrations.js';
 import type {
   AccountListQuery,
   CreateAccountInput,
@@ -56,10 +56,15 @@ export class MysqlStorage implements ProxyStorage {
   constructor(
     private readonly pool: Pool,
     private readonly requestStatsPerAccountLimit: number,
+    private readonly autoMigrate = true,
   ) {}
 
   async initialize(): Promise<void> {
-    await runMysqlMigrations(this.pool);
+    if (this.autoMigrate) {
+      await runMysqlMigrations(this.pool);
+    } else {
+      await validateMysqlTables(this.pool);
+    }
     await this.ping();
   }
 

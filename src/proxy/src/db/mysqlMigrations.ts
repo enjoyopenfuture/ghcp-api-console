@@ -4,6 +4,20 @@ const MIGRATION_LOCK = 'ghcp_proxy_schema_migrations';
 const INITIAL_SCHEMA_MIGRATION = '2026-08-27-proxy-mysql-initial';
 const TOKEN_COLLATION_MIGRATION = '2026-08-27-proxy-token-binary-collation';
 
+export async function validateMysqlTables(pool: Pool): Promise<void> {
+  for (const table of ['proxy_accounts', 'proxy_request_stats', 'proxy_identity_initializations']) {
+    try {
+      await pool.query(`SELECT 1 FROM ${table} LIMIT 0`);
+    } catch (cause) {
+      throw new Error(
+        `Cannot read required Proxy MySQL table "${table}" with MYSQL_AUTO_MIGRATE=false. ` +
+        'Ask a database administrator to prepare the business tables and grant the runtime account the required permissions.',
+        { cause },
+      );
+    }
+  }
+}
+
 export async function runMysqlMigrations(pool: Pool): Promise<void> {
   const connection = await pool.getConnection();
   let locked = false;
