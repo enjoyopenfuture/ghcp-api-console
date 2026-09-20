@@ -27,6 +27,6 @@ guidance-draft.md
 tmp.md
 curl.http
 
-
+.claude/*
 !docs/codebase-overview.md
 !docs/repo-map.md

@@ -97,7 +97,6 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 | `OPENCODE_VERSION` | `1.0.0` | 否 | 生成 `User-Agent: opencode/<version>`。 |
 | `OPENCODE_USER_AGENT` | 当前未配置 | 否 | 显式覆盖完整 User-Agent；非空时优先于 `OPENCODE_VERSION`。 |
 | `SSO_URL` | 当前未配置 | 否 | 预期 SSO 地址；任务里的 `ssoUrl` 可覆盖。 |
-| `SSO_PROVIDER` | `custom` | 否 | `custom` 或 `azure`；队列任务实际按请求体 `ssoType` 选择 provider。 |
 | `AZURE_STAY_SIGNED_IN` | `false` | 否 | Azure “保持登录”提示选择 Yes/No。 |
 | `AUTH_HEADLESS` | `true` | 否 | Playwright 是否无头运行。 |
 | `AUTH_DEBUG_ARTIFACT_DIR` | `.auth-debug` | 否 | 调试产物目录。 |
@@ -126,7 +125,7 @@ Linux 下如需访问宿主机的 proxy，可能还要给 Docker 增加 `--add-h
 
 Settings 更新必须携带当前 `expectedVersion`；其他管理员已先保存时返回 `409 settings_version_conflict`，Console 会重新加载最新值。首次迁移使用上表代码默认值，不从旧 `.env` 导入。当前 settings snapshot 和任务队列都是进程内状态；多个 Login 实例共享 SQLite 时，其他实例不会自动收到 setting 更新，而且任务队列本身也没有分布式领取机制。
 
-配置覆盖关系仅存在于任务层：任务的 `ssoUrl`/`ssoType` 和 `selectorOverrides` 分别覆盖默认 SSO URL/provider 和环境 selector；单次调试 CLI flag 会覆盖对应 runtime setting 或环境变量。Runtime Settings 与 `.env` 没有同名 key。
+任务的 `ssoUrl` 和 `selectorOverrides` 分别覆盖默认 SSO URL 和环境 selector。Provider 由任务必填的 `ssoType` 决定；单次调试命令使用 `--sso-type` / `LOGIN_SSO_TYPE`（兼容 `SSO_TYPE`），默认 `custom`。旧 `SSO_PROVIDER`（Compose 中的 `LOGIN_SSO_PROVIDER`）始终被任务/CLI 参数覆盖，现已移除，不再读取。单次调试 CLI flag 会覆盖对应 runtime setting 或环境变量。Runtime Settings 与 `.env` 没有同名 key。
 
 Login task 历史目前没有 retention setting 或环境变量，也不会自动按条数/时间清理。`success`、`failed`、`cancelled` 任务会保留到通过 Console 或 `DELETE /api/tasks/:id` 手动删除；`pending/running` 不允许删除。
 

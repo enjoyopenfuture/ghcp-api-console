@@ -148,7 +148,7 @@ cp .env.example .env
 | `COPILOT_API_BASE_URL` | Copilot API 地址；GitHub.com 默认 `https://api.githubcopilot.com`。 |
 | `GITHUB_API_BASE_URL` | SSO 调用 GitHub Copilot seat 和 AI Credits API 的根地址，默认 `https://api.github.com`。 |
 | `GITHUB_API_VERSION` | Copilot 请求的 `X-GitHub-Api-Version`，默认 `2026-06-01`。 |
-| `LOGIN_SSO_URL` / `LOGIN_SSO_PROVIDER` | Login 自动化使用的默认 SSO 登录 URL 和 provider；任务参数可覆盖 provider/URL。 |
+| `LOGIN_SSO_URL` | Login 自动化使用的默认 SSO 登录 URL；任务的 `ssoUrl` 可覆盖。Provider 由任务的 `ssoType` 决定，不通过环境变量配置。 |
 | `AUTH_HEADLESS` | Login Playwright 是否无头运行，默认 `true`。 |
 | `LOG_LEVEL` | 所有服务的结构化日志等级：`debug`、`info`、`warn`、`error`。 |
 | `PROXY_PORT` / `SSO_PORT` / `LOGIN_PORT` / `CONSOLE_PORT` | Compose 暴露到宿主机的端口，不会改变容器内服务端口。 |

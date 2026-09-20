@@ -51,7 +51,6 @@ services:
       PROXY_BASE_URL: http://proxy:3000
       LOG_DIR: /logs/login
       SSO_URL: ${LOGIN_SSO_URL:-http://sso:7001/login}
-      SSO_PROVIDER: ${LOGIN_SSO_PROVIDER:-custom}
       AUTH_HEADLESS: ${AUTH_HEADLESS:-true}
       AUTH_DEBUG_ARTIFACT_DIR: /logs/auth-debug
       GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-Ov23li8tweQw6odWQebz}
@@ -79,6 +78,7 @@ services:
       STORAGE_DRIVER: ${STORAGE_DRIVER:-sqlite}
       DB_PATH: ${DB_PATH:-/data/proxy.sqlite}
       MYSQL_URL: "${MYSQL_URL:-}"
+      MYSQL_AUTO_MIGRATE: "${MYSQL_AUTO_MIGRATE:-true}"
       MYSQL_CONNECTION_LIMIT: "${MYSQL_CONNECTION_LIMIT:-10}"
       MYSQL_SSL_MODE: ${MYSQL_SSL_MODE:-disabled}
       MYSQL_SSL_CA_PATH: "${MYSQL_SSL_CA_PATH:-}"

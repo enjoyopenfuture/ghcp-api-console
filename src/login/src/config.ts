@@ -20,7 +20,6 @@ export type SsoProvider = 'custom' | 'azure';
 
 export interface AuthConfig {
   ssoUrl?: string;
-  ssoProvider: SsoProvider;
   azureStaySignedIn: boolean;
   headless: boolean;
   debugArtifactsDir: string;
@@ -28,6 +27,7 @@ export interface AuthConfig {
 }
 
 export interface RuntimeAuthConfig extends AuthConfig {
+  ssoProvider: SsoProvider;
   timeoutMs: number;
   debugLogs: boolean;
   debugArtifacts: boolean;
@@ -49,7 +49,6 @@ export const config: LoginConfig = {
   },
   auth: {
     ssoUrl: process.env.SSO_URL,
-    ssoProvider: readSsoProvider(process.env.SSO_PROVIDER),
     azureStaySignedIn: readBoolean(process.env.AZURE_STAY_SIGNED_IN, false),
     headless: readBoolean(process.env.AUTH_HEADLESS, true),
     debugArtifactsDir: process.env.AUTH_DEBUG_ARTIFACT_DIR ?? '.auth-debug',
@@ -84,13 +83,6 @@ function readBoolean(value: string | undefined, defaultValue: boolean): boolean 
   if (/^(1|true|yes|on)$/i.test(value)) return true;
   if (/^(0|false|no|off)$/i.test(value)) return false;
   throw new Error(`Invalid boolean "${value}".`);
-}
-
-function readSsoProvider(value: string | undefined): SsoProvider {
-  const normalized = value?.trim().toLowerCase();
-  if (!normalized || normalized === 'custom') return 'custom';
-  if (normalized === 'azure') return 'azure';
-  throw new Error(`Invalid SSO_PROVIDER "${value}". Use "custom" or "azure".`);
 }
 
 function readOptionalString(value: string | undefined): string | undefined {

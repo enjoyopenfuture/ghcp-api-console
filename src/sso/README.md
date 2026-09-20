@@ -107,6 +107,8 @@ docker run --rm -p 7001:7001 --env-file src/sso/.env.example ghcp-sso
 
 `src/sso/src/config.ts` 使用 `dotenv/config` 读取环境变量；`.env.example` 是示例值，不代表生产可用值。
 
+`MOCK_GITHUB_BASE_URL` 仍用于本地 fallback，并未废弃；示例已显式设置 `SCIM_BASE_URL` 和 `SP_ACS_URL`，因此将它列为注释可选项。
+
 | 变量 | 默认值 | 何时必填 | 用途/关系 |
 |---|---:|---|---|
 | `PORT` | `7001` | 否 | Express 监听端口。 |

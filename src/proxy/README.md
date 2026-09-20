@@ -79,13 +79,15 @@ Dockerfile 会复制根 `package*.json`、`tsconfig.base.json` 和 `src`，执�
 
 Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config.ts` 的默认值；`src/proxy/.env.example` 是面向本模块的示例。
 
+示例默认使用 SQLite，`MYSQL_*` 列为注释可选项，并非废弃变量。切换为 `STORAGE_DRIVER=mysql` 时取消所需项的注释并填写连接信息；`MYSQL_SSL_MODE` 只能填写 `disabled`、`required`、`verify-ca` 中的一个值，不能把选项列表作为值。
+
 | 变量 | 代码默认值 / 示例值 | 必填 | 用途与关系 |
 | --- | --- | --- | --- |
 | `PORT` | `3000` / `3000` | 否 | HTTP 监听端口。 |
 | `LOG_LEVEL` | `info`（shared logger 默认）/ `info` | 否 | 日志级别：`debug`、`info`、`warn`、`error`；无效值回退 `info`。 |
 | `STORAGE_DRIVER` | `sqlite` / `sqlite` | 否 | `sqlite` 或 `mysql`；SQLite 只支持单实例，MySQL 用于多 Pod。 |
 | `DB_PATH` | `./data/proxy.sqlite` / 同 | SQLite 模式 | SQLite 文件路径；启动时自动创建目录、开启 WAL。 |
-| `MYSQL_URL` | 未设置 / 空 | MySQL 模式 | 所有 Proxy Pod 共享的 MySQL 8 连接 URL。 |
+| `MYSQL_URL` | 未设置 / 注释占位值 | MySQL 模式 | 所有 Proxy Pod 共享的 MySQL 8 连接 URL。 |
 | `MYSQL_AUTO_MIGRATE` | `true` / `true` | 否 | 仅影响 MySQL；`false` 时跳过自动迁移，仅检查三张必需业务表存在且可读，不访问迁移历史。 |
 | `MYSQL_CONNECTION_LIMIT` | `10` / `10` | 否 | 每个 Proxy Pod 的 MySQL 连接池上限。 |
 | `MYSQL_SSL_MODE` | `disabled` / `disabled` | 否 | `disabled`、`required`（加密但不验证 CA）或 `verify-ca`；远程生产数据库应优先使用 `verify-ca`。 |
