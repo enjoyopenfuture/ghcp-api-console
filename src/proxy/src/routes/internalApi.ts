@@ -1,11 +1,37 @@
 import { Router } from 'express';
-import { apiError } from '@ghcp/shared';
+import { apiError, HttpApiError, readLoginCredentials } from '@ghcp/shared';
 import { clearModelsCache } from '../copilot/copilotClient.js';
 import { deleteAccountsBySsoUser, failCopilotOauthAuthorization, getAccount, saveCopilotOauthToken, toAccountDto } from '../db/accountsRepo.js';
+import { prepareLoginAuthorization } from '../accounts/loginAuthorization.js';
 import { Logger } from '../logger.js';
 
 export const internalApiRouter = Router();
 const logger = new Logger('internal-api');
+
+/**
+ * Login calls this to retry a task: Proxy resolves the default SSO password (or takes the override)
+ * and switches the account to the new attempt, but only if the account still points at the attempt
+ * the task ran before (`previousAttemptId`, `null` for none).
+ */
+internalApiRouter.post('/accounts/:identity/oauth-attempts/:attemptId/prepare', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const body: Record<string, unknown> = req.body ?? {};
+    if (!/^[a-f0-9-]{36}$/i.test(req.params.attemptId)
+      || typeof body.ssoUser !== 'string' || typeof body.ghLogin !== 'string'
+      || (body.ssoType !== 'custom' && body.ssoType !== 'azure')
+      || (body.previousAttemptId !== null && typeof body.previousAttemptId !== 'string')) {
+      throw new HttpApiError(400, 'invalid_attempt', 'A valid attempt ID, previous attempt, account mapping and SSO type are required.');
+    }
+    res.json(await prepareLoginAuthorization(req.params.identity, req.params.attemptId, {
+      ...readLoginCredentials(body), ssoUser: body.ssoUser, ghLogin: body.ghLogin, ssoType: body.ssoType, previousAttemptId: body.previousAttemptId,
+    }));
+  } catch (err) {
+    logger.warn('prepare-authorization-failed', 'Could not prepare login authorization', { identity: req.params.identity, error: err instanceof Error ? err.message : String(err) });
+    res.status(err instanceof HttpApiError ? err.status : 502)
+      .json(apiError(err instanceof HttpApiError ? err.code : 'authorization_prepare_failed', err instanceof Error ? err.message : String(err)));
+  }
+});
 
 internalApiRouter.put('/accounts/:identity/copilot-oauth-token', async (req, res) => {
   const { oauthAttemptId, copilotOauthToken, ghLogin } = req.body as {

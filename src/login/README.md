@@ -5,15 +5,19 @@
 ## 核心功能
 
 - **登录任务队列**：`POST /api/tasks` 创建任务，内存队列按 DB 运行时设置控制并发；任务元数据持久化到 SQLite。
-- **任务状态管理**：状态包括 `pending`、`running`、`success`、`failed`、`cancelled`；支持列表、分页搜索、查看、取消、删除、重试。服务重启时会把未完成的 `pending/running` 标记为失败。
+- **任务状态管理**：状态包括 `pending`、`running`、`cancelling`、`success`、`failed`、`cancelled`；支持完整筛选、批量预览、独立尝试历史和实际队列快照。重启时未完成任务直接标记为中断（取消中的标记为已取消）并通知 Proxy 放弃对应 attempt，不自动重放；若 token 在重启前已写回，Proxy 因 attempt 已清空会忽略该通知，账号保持可用，只是任务记录显示中断。
 - **Device flow + Playwright 自动授权**：先请求 GitHub device code，再用 `playwright-extra` + stealth 插件打开验证页，处理 GitHub 账号选择、GitHub 登录、企业 SSO 中转、自定义 SSO 或 Azure SSO，最后轮询 access token。**这是最消耗资源的部分，单次登陆大约1分钟**。
-- **账号级日志与调试产物**：每个 SSO 用户有独立日志文件；可开启 debug 日志、失败截图和 trace。
+- **尝试级日志与调试产物**：每次任务尝试使用独占日志文件；可开启 debug 日志、失败截图和 trace，旧账号级日志仅保留为不完整历史。
 - **Token 回传 Proxy**：成功时调用 `proxy` 的 `/internal/accounts/:identity/copilot-oauth-token` 保存 token；失败时调用 `/internal/accounts/:identity/mark-copilot-oauth-failed` 标记失败。
 - **单账号调试命令**：`login:copilot-oauth` 可跳过任务队列，直接登录并把原始 Copilot OAuth token 输出到 stdout。
 
 ### SSO 密码来源与改密影响
 
-Login 不从 SSO 数据库读取或还原密码。创建或重试任务必须提供明文 `ssoPassword`，该密码仅保留在运行时用于当前登录，不会写入 `login_tasks` 或任务历史。对于已有 SSO 用户，Proxy 的自动初始化只能使用 SSO `/users/ensure` 返回的 `passwordForLogin`；SSO 仅能识别当前默认密码或与用户名相同的密码。用户改成其他密码后，需要在 Console 的 **Reauthorize Copilot OAuth** 中手动输入新密码，否则自动初始化无法创建可执行的登录任务。
+Login 不读取 SSO 数据库，也不还原密码。创建任务的服务间请求仍传入运行时 `ssoPassword`；重试可以显式选择 `{ credentialMode: 'default' }`，由 Proxy 调用 SSO 只读内部接口，验证配置默认密码或用户名候选值。单账号覆盖使用 `{ credentialMode: 'override', ssoPassword }`，旧的非空 `ssoPassword` 请求仍兼容。Azure、已改密或默认值不可验证时必须提供覆盖值；不创建用户、不改密。密码只存在于本次传输和执行内存，不进入任务、批次、日志、URL 或导出。
+
+启动恢复统一由 `tasks/recovery.ts` 的 `recoverLoginOutcomes()` 负责：释放中断的删除标记，把 pending/running 任务标记为 `failed / service_interrupted`、把 cancelling 任务标记为 cancelled（同步完成，不依赖 Proxy），再在后台顺序调用 Proxy 的 `mark-copilot-oauth-failed` 放弃这些 attempt，避免账号停留在 `refreshing`；没有 attempt 的旧任务单独标记中断。通知失败只记录日志，账号若仍显示 `refreshing`，从 Console 重新授权即可覆盖。不会重新执行登录。
+
+token 写回失败（包括超时、响应丢失）时任务标记为 `token_write_failed`，队列随后向 Proxy 上报失败；该上报按 attempt 栅栏，如果写回其实已经落地，Proxy 会忽略它，账号保持有效而任务记录显示失败。取消时先等待被中止的运行释放浏览器与 device code，再判定：运行在此期间自行成功则保留成功，否则标记 cancelled 并通知 Proxy 放弃该 attempt。
 
 ## 启动方式
 
@@ -127,7 +131,7 @@ Settings 更新必须携带当前 `expectedVersion`；其他管理员已先保�
 
 任务的 `ssoUrl` 和 `selectorOverrides` 分别覆盖默认 SSO URL 和环境 selector。Provider 由任务必填的 `ssoType` 决定；单次调试命令使用 `--sso-type` / `LOGIN_SSO_TYPE`（兼容 `SSO_TYPE`），默认 `custom`。旧 `SSO_PROVIDER`（Compose 中的 `LOGIN_SSO_PROVIDER`）始终被任务/CLI 参数覆盖，现已移除，不再读取。单次调试 CLI flag 会覆盖对应 runtime setting 或环境变量。Runtime Settings 与 `.env` 没有同名 key。
 
-Login task 历史目前没有 retention setting 或环境变量，也不会自动按条数/时间清理。`success`、`failed`、`cancelled` 任务会保留到通过 Console 或 `DELETE /api/tasks/:id` 手动删除；`pending/running` 不允许删除。
+Login task 历史没有自动 retention。可按终态和 `finishedBefore` 手动预览删除；`pending/running/cancelling` 都不可删除。清理仅移除任务、尝试记录及有所有权证明的独占日志，保留共享旧日志和批次结果摘要。日志清理失败时保留任务供显式重试；清理中拒绝同任务重试，重启只释放清理占用，不自动继续删除。
 
 ## 接口与 API 边界
 
@@ -148,12 +152,20 @@ Login task 历史目前没有 retention setting 或环境变量，也不会自�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/tasks?limit=100` | 返回最近任务数组，按 `created_at` 倒序。 |
-| `GET` | `/api/tasks?page=1&pageSize=25&q=keyword&status=failed` | 分页搜索，返回 `PageResponse<LoginTaskDto>`；`status` 只能是五种任务状态。 |
+| `GET` | `/api/tasks?page=1&pageSize=25&q=keyword&status=failed` | 完整分页；支持逗号分隔多状态、`from/to`、`identity`、`minAttempts`、`failureCode`、`minWaitSeconds/minRunSeconds`、`finishedBefore` 和白名单排序。`q` 中的 `%`、`_` 按字面匹配。`minWaitSeconds` 只匹配排队中的 `pending` 任务，`minRunSeconds` 只匹配 `running`/`cancelling` 任务；两者互斥，同时传入或与不相交的 `status` 组合会返回 `400 invalid_query`，而不是静默返回空页。 |
 | `POST` | `/api/tasks` | 创建登录任务，返回 `202` 和初始 `LoginTaskDto`。 |
 | `GET` | `/api/tasks/:id` | 查看单个任务；不存在返回 `404 task_not_found`。 |
-| `POST` | `/api/tasks/:id/cancel` | 取消任务。待执行任务会从内存队列移除；运行中的浏览器流程当前未提供强制中断。 |
-| `DELETE` | `/api/tasks/:id` | 删除已结束任务；`pending/running` 返回 `400 task_delete_not_allowed`。 |
-| `POST` | `/api/tasks/:id/retry` | 用原任务的 `identity/ssoUser/ghLogin/ssoType` 重新入队，可在请求体提供新密码、`ssoUrl`、selector 覆盖。 |
+| `POST` | `/api/tasks/:id/cancel` | 待执行任务立即移出队列；运行中贯通 AbortSignal，保持 `cancelling` 到资源释放；运行若已成功则保留成功，否则标记取消并通知 Proxy。 |
+| `DELETE` | `/api/tasks/:id` | 删除终态任务及独占日志；活动或正在清理的任务返回 `400 task_delete_not_allowed`。 |
+| `POST` | `/api/tasks/:id/retry` | 保留任务 ID，原子创建新 attempt；支持默认密码/单账号覆盖及原有 `ssoUrl`、selector 覆盖。 |
+| `GET` | `/api/tasks/summary`、`/api/queue` | 全部保留任务聚合；实际 preparing/pending/active/cancelling、槽位、排队位置、等待与运行时长。 |
+| `GET` | `/api/tasks/by-attempt/:attemptId` | 按独立尝试查询接受结果，用于响应丢失核对；不会误认后来的重试。 |
+| `GET` | `/api/tasks/:id/attempts` | 独立尝试历史；旧数据缺失部分标记 `historyIncomplete`，不伪造历史。 |
+| `GET` | `/api/tasks/:id/attempts/:attemptId/log` | 最多 20 KB 脱敏预览；`download=1` 下载完整文本，仅允许该 attempt 所属受控文件。 |
+| `GET/POST` | `/api/tasks/export` | GET 导出全部匹配；`scope=page` 导出当前页；POST `{ selection }` 导出已选项（最多 1000）。 |
+| `POST` | `/api/tasks/operations/preview` | `{ action: 'retry' \| 'cancel' \| 'delete', selection: { ids } \| { query, excludedIds } }`；冻结最多 1000 个 ID，预览有效期 10 分钟。 |
+| `POST` | `/api/tasks/operations/:id/execute` | `{ overrides?: [{ id, password }] }`；202 返回批次，重复提交同一 `:id` 返回当前状态而不会再执行，密码不落库。 |
+| `GET` | `/api/tasks/operations/:id`、`/:id/export` | 批次进度及结果 CSV；导出加 `failed=1` 仅取失败项；预览/结果只在进程内存中，没有可列出全部批次的接口。 |
 | `GET` | `/api/settings/runtime` | 返回 `LoginRuntimeSettingsDto`，包含四个 setting、`version` 和 `updatedAt`。 |
 | `PATCH` | `/api/settings/runtime` | `{ expectedVersion, changes }`；保存 runtime settings，校验失败返回 400，版本冲突返回 409。 |
 
@@ -179,6 +191,7 @@ Login task 历史目前没有 retention setting 或环境变量，也不会自�
 
 - GitHub：调用 `https://github.com/login/device/code` 和 `https://github.com/login/oauth/access_token`。
 - Proxy：通过 `PROXY_BASE_URL` 调用内部接口：
+  - `POST /internal/accounts/:identity/oauth-attempts/:attemptId/prepare`，body 含凭据模式、账号映射、`ssoType` 与 `previousAttemptId`（任务上一次的 attempt，账号当前 attempt 不一致时 Proxy 返回 `409 authorization_conflict`）；Proxy 解析本次凭据并把账号切到新 attempt。
   - `PUT /internal/accounts/:identity/copilot-oauth-token`，body `{ oauthAttemptId, copilotOauthToken, ghLogin }`
   - `POST /internal/accounts/:identity/mark-copilot-oauth-failed`，body `{ oauthAttemptId, failureReason }`
 - Console/proxy 可通过共享 `X-Internal-Token` 访问 login；login 本身当前未提供浏览器 UI。
@@ -197,13 +210,15 @@ Login task 历史目前没有 retention setting 或环境变量，也不会自�
 | `gh_login` | GitHub 登录名。 |
 | `oauth_attempt_id` | proxy 生成的授权代次，用于拒绝过期任务回写。 |
 | `sso_type` | `custom` 或 `azure`。 |
-| `status` | `pending/running/success/failed/cancelled`。 |
+| `status` | `pending/running/cancelling/success/failed/cancelled`。 |
 | `attempts` | 执行次数，进入 running 时递增。 |
 | `failure_reason` | 失败或取消原因。 |
-| `log_path` | 账号级日志文件路径。 |
+| `log_path` | 最新尝试的独占日志路径；旧账号级日志只作为不完整历史保留。 |
 | `created_at`、`started_at`、`finished_at` | ISO 时间。 |
 
 索引：`idx_login_tasks_status_created_at(status, created_at)`。
+
+`login_task_attempts` 保存 `(task_id, attempt_number)`、授权 attempt、阶段/时间、错误代码和日志引用；`(task_id, attempt_number)` 上建有唯一索引（仅在历史数据本身不含重复时创建），避免并发写入产生两个相同编号的尝试。当前任务回调必须同时匹配任务和 attempt，终态不被迟到回调覆盖。删除任务时会把被覆盖的 `stage` 暂存到 `prior_stage`，删除失败后恢复原阶段而不是退回到状态名。批量操作（`/api/tasks/operations`）的冻结目标和逐项结果只保存在 Login 进程内存中，预览 10 分钟内有效、结果在结束后保留约 1 小时，重启即丢失且不自动重新执行。登录重试批次追踪实际尝试结果，不把入队当作成功。
 
 `login_runtime_settings` 是 `id=1` 的单例严格表，保存 `concurrency`、`auth_timeout_ms`、`auth_debug_logs`、`auth_debug_artifacts`、乐观锁 `version` 和 `updated_at`。Migration 只在不存在时写入代码默认值，不覆盖已经保存的设置。
 
@@ -213,7 +228,7 @@ Login task 历史目前没有 retention setting 或环境变量，也不会自�
 - `RuntimeTaskPayload`：`CreateLoginTaskRequest` 加上 `taskId`。
 - `HeadlessPlaywrightAuthStrategy`：实现 `AuthStrategy.authorize(device)`。
 - `DeviceCodeResponse`：GitHub device flow 返回的 `device_code/user_code/verification_uri/expires_in/interval`。
-- `AccountLogger`：按 SSO 用户生成日志，字段会通过共享 redaction 规则隐藏 password/token/secret 等敏感值。
+- `AccountLogger`：新任务按任务/attempt 的摘要生成独占文件，字段及实际运行密码均脱敏；旧共享日志不覆盖迁移、不通过新下载接口暴露。
 
 ### 使用的共享 contracts
 
@@ -236,10 +251,10 @@ src/login/
     │   ├── deviceFlow.ts      # GitHub device code 与 token polling
     │   ├── HeadlessPlaywrightAuthStrategy.ts
     │   └── types.ts
-    ├── clients/proxyClient.ts # token 成功/失败回写 proxy
+    ├── clients/proxyClient.ts # 重试准备、token 成功/失败回写
     ├── db/                    # SQLite 连接、迁移、任务仓库、runtime settings repo
     ├── routes/                # tasks API 与 settings API
-    └── tasks/                 # 队列、执行器、账号日志
+    └── tasks/                 # 队列、执行器、重试/删除、启动恢复、尝试日志
 ```
 
 ## 开发提示

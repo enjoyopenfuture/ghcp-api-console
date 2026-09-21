@@ -12,6 +12,7 @@ export function runMigrations(db: Database.Database): void {
   migrateCopilotOauthCredentials(db);
   createProxyAccountsTable(db);
   addColumnIfMissing(db, 'proxy_accounts', 'copilot_oauth_attempt_id', 'TEXT');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_proxy_accounts_updated ON proxy_accounts(updated_at, identity)');
   db.exec(`
     CREATE TABLE IF NOT EXISTS proxy_request_stats (
       id TEXT PRIMARY KEY,
@@ -31,6 +32,8 @@ export function runMigrations(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_proxy_request_stats_identity_time
       ON proxy_request_stats(identity, requested_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_proxy_request_stats_time
+      ON proxy_request_stats(requested_at DESC, id DESC);
   `);
   addColumnIfMissing(db, 'proxy_request_stats', 'cache_input_tokens', 'INTEGER');
   addColumnIfMissing(db, 'proxy_request_stats', 'cache_write_tokens', 'INTEGER');

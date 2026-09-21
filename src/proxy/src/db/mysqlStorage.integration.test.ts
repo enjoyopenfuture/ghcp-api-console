@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createPool, type RowDataPacket } from 'mysql2/promise';
 import { MysqlStorage } from './mysqlStorage.js';
+import { randomUUID } from 'node:crypto';
 
 const mysqlUrl = process.env.MYSQL_TEST_URL;
 const mysqlRuntimeUrl = process.env.MYSQL_TEST_RUNTIME_URL;
@@ -71,6 +72,39 @@ test('provides MySQL repository parity and cross-instance claims', {
     assert.equal(await first.invalidateCopilotOauthToken('Alice', 'stale-token', 'expired'), false);
     assert.equal(await first.invalidateCopilotOauthToken('Alice', 'casesensitivetoken', 'expired'), false);
     assert.equal(await first.invalidateCopilotOauthToken('Alice', 'CaseSensitiveToken', 'expired'), true);
+    assert.equal(await second.beginCopilotOauthAuthorization('Alice', 'stale-retry', 'unknown-previous'), false, 'A retry naming the wrong previous attempt is refused');
+    for (let round = 0; round < 8; round++) {
+      const attemptId = `write-fail-${round}`;
+      const token = `fixture-race-token-${round}`;
+      assert.equal(await first.beginCopilotOauthAuthorization('Alice', attemptId), true);
+      // Token write and failure report race on the account row; exactly one of them wins.
+      const [saved, failed] = await Promise.all([first.saveCopilotOauthToken('Alice', attemptId, token), second.failCopilotOauthAuthorization('Alice', attemptId)]);
+      assert.equal(Boolean(saved) !== failed, true);
+      const account = await first.getAccount('Alice');
+      assert.equal(account?.copilotOauthToken === token, Boolean(saved));
+      assert.equal(account?.copilotOauthStatus, saved ? 'valid' : 'failed');
+    }
+    await first.withReadSnapshot(async (reader) => {
+      assert.equal((await reader.listAccounts()).total, 1);
+      await second.createAccount({ identity: 'snapshot-extra', ssoUser: 'snapshot-extra' });
+      assert.equal((await reader.listAccounts()).total, 1);
+      assert.equal((await second.listAccounts()).total, 2);
+      await second.deleteAccount('snapshot-extra');
+    });
+    for (let index = 0; index < 137; index++) {
+      await first.createAccount({ identity: `summary-${index}`, ssoUser: `summary-${index}`, copilotOauthStatus: index % 2 ? 'valid' : 'failed' });
+    }
+    assert.equal((await first.summarizeAccounts()).total, 138);
+    assert.equal((await second.listAccounts({ q: 'summary-', status: 'failed' })).total, 69);
+    await first.createAccount({ identity: 'query-account', ssoUser: 'query-account' });
+    await firstPool.query('INSERT INTO proxy_request_stats (id, identity, requested_at, path, success, model) VALUES ?', [
+      Array.from({ length: 1501 }, (_, index) => [randomUUID(), 'query-account', new Date(Date.UTC(2020, 0, 1, 0, 0, index)), '/v1/models', index === 0 ? 0 : 1, index === 0 ? 'older-only' : 'recent']),
+    ]);
+    assert.equal((await first.listRequestStats('query-account', 1000)).some((stat) => stat.model === 'older-only'), false);
+    const older = await second.listRequestStatsPage({ identity: 'query-account', model: 'older-only', success: 'false' });
+    assert.equal(older.total, 1);
+    assert.equal(older.items[0]?.model, 'older-only');
+    assert.equal((await second.listRequestStatsPage({ identity: 'query-account', page: 16, pageSize: 100 })).items.length, 1);
 
     const claims = await Promise.all([
       first.claimIdentityInitialization('new-user', 'claim-a', 60),

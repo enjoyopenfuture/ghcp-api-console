@@ -126,12 +126,30 @@ test('reports disabled state without creating storage', async () => {
     maxFileBytes: 1024,
     maxFiles: 2,
   });
+
   const result = await store.list();
   assert.equal(result.enabled, false);
   assert.equal(result.redacted, true);
   assert.equal(result.total, 0);
   assert.throws(() => store.get(randomUUID()), /disabled/);
 });
+
+for (const shared of [false, true]) {
+  test(`diagnostic filters and export snapshots retain consistent membership (shared=${shared})`, async (t) => {
+    const directory = testDirectory();
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const store = new ErrorDiagnosticsStore({ enabled: true, directory, shared, instanceId: 'filter-test', redacted: true, maxFileBytes: 1024 * 1024, maxFiles: 3 });
+    const target = { ...record(randomUUID(), '2026-01-01T00:00:00.000Z'), identity: 'selected-user', model: 'older-only' };
+    await store.append(target);
+    await store.append({ ...record(randomUUID(), '2026-02-01T00:00:00.000Z'), identity: 'other-user', model: 'recent' });
+    const query = { identity: 'selected-user', model: 'older-only', to: '2026-01-02T00:00:00.000Z' };
+    assert.equal((await store.list(1, 10, query)).total, 1);
+    const snapshot = await store.snapshot();
+    await store.clear();
+    assert.equal((await store.list(1, 10, query)).total, 0);
+    assert.equal(store.pageSnapshot(snapshot, query).items[0]?.id, target.id);
+  });
+}
 
 test('shared mode aggregates cross-instance records in global newest-first order', async () => {
   const directory = testDirectory();

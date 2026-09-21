@@ -1,7 +1,7 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
-import { redactFields } from '@ghcp/shared';
+import { dirname, join } from 'node:path';
+import { redactSensitiveValue, redactSecrets } from '@ghcp/shared';
 
 type LogLevel = 'info' | 'warn' | 'error' | 'debug';
 
@@ -10,16 +10,23 @@ export class AccountLogger {
     private readonly accountName: string,
     private readonly filePath: string,
     private readonly debugEnabled: boolean,
+    private readonly onStage?: (step: string) => void,
+    private readonly secrets: string[] = [],
   ) {}
 
-  static create(logDir: string, accountName: string, debugEnabled: boolean): AccountLogger {
-    const bucket = createHash('sha256').update(accountName).digest('hex').slice(0, 2);
-    const dir = join(logDir, bucket);
-    mkdirSync(dir, { recursive: true });
-    const filePath = join(dir, `${sanitizeFileName(accountName)}.log`);
-    const logger = new AccountLogger(accountName, filePath, debugEnabled);
+  static create(logDir: string, accountName: string, debugEnabled: boolean, attemptKey?: string, onStage?: (step: string) => void, secrets: string[] = []): AccountLogger {
+    const filePath = AccountLogger.pathFor(logDir, accountName, attemptKey);
+    mkdirSync(dirname(filePath), { recursive: true });
+    const logger = new AccountLogger(accountName, filePath, debugEnabled, onStage, secrets);
     writeLine(filePath, 'w', logger.format('info', 'start', 'Starting login task log', { accountName }));
     return logger;
+  }
+
+  static pathFor(logDir: string, accountName: string, attemptKey?: string): string {
+    const bucket = createHash('sha256').update(accountName).digest('hex').slice(0, 2);
+    const dir = join(logDir, bucket);
+    const name = attemptKey ? `${sanitizeFileName(accountName).slice(0, 80)}-${createHash('sha256').update(attemptKey).digest('hex')}` : sanitizeFileName(accountName);
+    return join(dir, `${name}.log`);
   }
 
   get path(): string {
@@ -27,6 +34,7 @@ export class AccountLogger {
   }
 
   info(step: string, message: string, fields?: Record<string, unknown>): void {
+    this.onStage?.(step);
     this.write('info', step, message, fields);
   }
 
@@ -47,8 +55,8 @@ export class AccountLogger {
   }
 
   private format(level: LogLevel, step: string, message: string, fields?: Record<string, unknown>): string {
-    const suffix = fields ? ` ${JSON.stringify(redactFields(fields))}` : '';
-    return `${new Date().toISOString()} [${this.accountName}] ${level.toUpperCase()} ${step}: ${message}${suffix}\n`;
+    const suffix = fields ? ` ${JSON.stringify(redactSensitiveValue(fields))}` : '';
+    return redactSecrets(`${new Date().toISOString()} [${this.accountName}] ${level.toUpperCase()} ${step}: ${message}${suffix}\n`, this.secrets);
   }
 }
 

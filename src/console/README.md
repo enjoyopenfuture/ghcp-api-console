@@ -38,7 +38,7 @@ Console 解决“运维/开发人员如何集中管理各服务状态和手动�
 | AI Credits Usage | `AiCreditsUsagePage` | 读取/刷新企业 AI Credits 用量、展示预计本月用量和 Copilot seat 成本。 |
 | Request Stats | `RequestStatsPage` | 查看 proxy 请求统计，按 identity/GH login、model、成功状态过滤。 |
 | Proxy Accounts | `ProxyAccountsPage` | 查看 identity 映射和 Copilot OAuth 状态、详情、验证后导入 token、发起重新授权、批量删除选中 Proxy account 及其 request stats。 |
-| Login Tasks | `LoginTasksPage` | 查询/分页/筛选登录任务，取消、重试失败任务、删除终态任务。 |
+| Login Tasks | `LoginTasksPage` | 完整筛选、可调分页、跨页批量重试/取消/清理、实际队列、阶段时长、独立尝试及脱敏日志。 |
 | Settings | `SettingsPage` | 修改当前 Console 管理员密码；在线读取/更新 SSO 与 Login runtime settings。 |
 | Error Diagnostics | `ErrorDiagnosticsPage` | 分页查看 Copilot 上游失败摘要，预览含 headers/body/curl 的人类可读日志，下载完整 `.log`，清空诊断文件。 |
 | Diagnostics | `DiagnosticsPage` | 调用 proxy/sso/login-service 代理路由检查服务连通性和内部 token 是否匹配。 |
@@ -137,6 +137,8 @@ SSO settings 保存在 `sso.sqlite`：用户上限、用户名 fallback、默认
 
 Console 管理员密码不是 runtime setting。Settings 页面调用 Console 自身的 `PATCH /api/console/password`，先校验当前密码，再为当前登录用户名生成新的随机 salt 和 scrypt hash，写回 `ADMINS_FILE`。新密码立即用于后续登录；当前 cookie session 不会被注销。
 
+Settings 按 SSO、Login、管理员安全排列为独立的全宽区块，不使用等高双列卡片。桌面布局将用途与生效说明放在左侧、分组表单放在右侧；窄屏改为上下排列。SSO 区分账户默认值和同步/重试参数，Login 区分任务执行和调试选项；输入项就近显示单位、范围及说明。每个区块独立保存，版本和更新时间与保存按钮位于同一操作区，原有校验与版本冲突处理不变。
+
 | 服务 | Setting | 默认值 | Console 校验范围 |
 | --- | --- | ---: | --- |
 | SSO | `maxSsoUsers` | `null`（不限） | 空值或整数 `1..1000000` |
@@ -151,7 +153,7 @@ Console 管理员密码不是 runtime setting。Settings 页面调用 Console �
 | Login | `authDebugLogs` | `false` | boolean |
 | Login | `authDebugArtifacts` | `false` | boolean |
 
-Proxy 当前没有可由 Console 修改的 runtime settings。`REQUEST_STATS_PER_ACCOUNT_LIMIT` 和 `PROXY_ERROR_DIAGNOSTICS_*` 只能通过 Proxy 环境变量配置并重启生效；Error Diagnostics 页面只负责读取、下载和清空记录，不修改采集策略。Login task 历史也没有自动 retention setting，只能在 Login Tasks 页面逐条删除终态任务。密钥、服务 URL、文件路径、证书和 token 均不应进入 Settings。
+Proxy 当前没有可由 Console 修改的 runtime settings。`REQUEST_STATS_PER_ACCOUNT_LIMIT` 和 `PROXY_ERROR_DIAGNOSTICS_*` 只能通过 Proxy 环境变量配置并重启生效；Error Diagnostics 页面只负责筛选、读取、下载和清空记录，不修改采集策略。Login 历史没有自动 retention，可按终态和结束时间预览批量清理。密钥、默认密码、服务 URL、文件路径、证书和 token 均不应进入 Settings。
 
 ## 5. 接口与 API 边界
 
@@ -180,18 +182,31 @@ Proxy 当前没有可由 Console 修改的 runtime settings。`REQUEST_STATS_PER
 - 非 2xx 时尝试读取 `error.message` 并抛出 `Error`。
 - `204` 返回 `undefined`，其他成功响应解析为 JSON。
 
+#### 统一列表与操作调用
+
+完整管理列表由 `ManagedList` 直接调用通用 `api<T>()`，使用服务端筛选、排序和分页，不再为每个列表维护单独的 API 包装函数，也不在前端把数组补成分页响应。
+
+| 列表 | Console GET 路径 | 响应 |
+| --- | --- | --- |
+| SSO Users | `/api/console/sso/users` | `PageResponse<SsoUserDto>` |
+| Proxy Accounts | `/api/console/proxy/accounts` | `PageResponse<ProxyAccountDto>` |
+| Login Tasks | `/api/console/login-service/tasks` | `PageResponse<LoginTaskDto>` |
+| Request Stats | `/api/console/proxy/request-stats` | `PageResponse<ProxyRequestStatDto>` |
+| Error Diagnostics | `/api/console/proxy/error-diagnostics` | `ProxyErrorDiagnosticsListResponse` |
+
+Users、Proxy Accounts 和 Login Tasks 的列表操作由 `useOperations` 统一访问对应资源下的 `/operations`：内部冻结目标 `POST /preview`，执行 `POST /:id/execute`，手动查询 `GET /:id`。普通操作直接串联冻结与执行，不弹出预览页面；危险操作仅显示简短确认框，重试/重新授权保留凭据确认。行内操作使用单个目标，复用同样的流程。
+
+Proxy 单账号删除、Login 单任务取消/删除/重试的服务端 HTTP 接口仍保留兼容；只是当前列表不再通过旧的前端包装函数调用它们。接口语义见 [Proxy README](../proxy/README.md) 和 [Login README](../login/README.md)。下列 client 提供摘要读取、详情、设置、导入等专用调用，并保留已有的兼容导入入口。
+
 #### proxy client（`src/web/api/proxy.ts`）
 
 | 函数 | Console 路径 | 核心结构 |
 | --- | --- | --- |
-| `listProxyAccounts({ q,page,pageSize,sort,dir })` | `GET /api/console/proxy/accounts` | `PageResponse<ProxyAccountDto>`；兼容数组响应并在前端包装分页。 |
 | `getProxyAccount(identity)` | `GET /api/console/proxy/accounts/:identity` | `ProxyAccountDto` |
-| `deleteProxyAccount(identity)` | `DELETE /api/console/proxy/accounts/:identity` | `DeleteProxyAccountResult`；只删除 Proxy 数据，不删除 SSO/GH 用户。 |
-| `listRequestStats({ identity?, limit? })` | `GET /api/console/proxy/request-stats` 或 `/accounts/:identity/request-stats` | `ProxyRequestStatDto[]` |
-| `reauthorizeCopilotOauth(identity, { ssoPassword, ssoType })` | `POST /api/console/proxy/accounts/:identity/copilot-oauth/reauthorize` | `ProxyAccountDto | undefined` |
+| `listRequestStats({ identity?, limit? })` | `GET /api/console/proxy/request-stats` 或 `/accounts/:identity/request-stats` | `ProxyRequestStatDto[]`；供 Dashboard 和账号详情读取近期样本，不用于完整列表分页。 |
+| `reauthorizeCopilotOauth(identity, { credentialMode, ssoPassword?, ssoType? })` | `POST /api/console/proxy/accounts/:identity/copilot-oauth/reauthorize` | `ProxyAccountDto`；密码默认由服务端解析 |
 | `importCopilotOauthTokens(csvText)` | `POST /api/console/proxy/accounts/copilot-oauth-token/import` | `BatchResult<ImportCopilotOauthTokenRow>`；请求 `{ csvText }`。 |
-| `listErrorDiagnostics({ page,pageSize })` | `GET /api/console/proxy/error-diagnostics` | `ProxyErrorDiagnosticsListResponse` 摘要分页。 |
-| `getErrorDiagnostic(id)` | `GET /api/console/proxy/error-diagnostics/:id` | 完整 `ProxyErrorDiagnosticRecordDto`。 |
+| `getErrorDiagnostic(id)` | `GET /api/console/proxy/error-diagnostics/:id` | `ProxyErrorDiagnosticDetailDto`。 |
 | `downloadErrorDiagnostic(id)` | `GET /api/console/proxy/error-diagnostics/:id/download` | 返回附件 `Blob` 和服务端文件名。 |
 | `clearErrorDiagnostics()` | `DELETE /api/console/proxy/error-diagnostics` | 发送 `{ confirm: true }` 清空全部记录。 |
 
@@ -199,7 +214,6 @@ Proxy 当前没有可由 Console 修改的 runtime settings。`REQUEST_STATS_PER
 
 | 函数 | Console 路径 | 核心结构 |
 | --- | --- | --- |
-| `listSsoUsers({ q,page,pageSize,sort,dir })` | `GET /api/console/sso/users` | `PageResponse<SsoUserDto>` |
 | `getSsoUserCapacity()` | `GET /api/console/sso/users/capacity` | `SsoUserCapacityDto` |
 | `getSsoRuntimeSettings()` | `GET /api/console/sso/settings/runtime` | `SsoRuntimeSettingsDto` |
 | `updateSsoRuntimeSettings({ expectedVersion, changes })` | `PATCH /api/console/sso/settings/runtime` | `SsoRuntimeSettingsDto` |
@@ -219,13 +233,9 @@ Proxy 当前没有可由 Console 修改的 runtime settings。`REQUEST_STATS_PER
 
 | 函数 | Console 路径 | 核心结构 |
 | --- | --- | --- |
-| `listLoginTasks(limit)` | `GET /api/console/login-service/tasks?limit=...` | `LoginTaskDto[]` |
+| `listLoginTasks(limit)` | `GET /api/console/login-service/tasks?limit=...` | `LoginTaskDto[]`；供 Dashboard 读取近期任务，不用于完整列表分页。 |
 | `getLoginRuntimeSettings()` | `GET /api/console/login-service/settings/runtime` | `LoginRuntimeSettingsDto` |
 | `updateLoginRuntimeSettings({ expectedVersion, changes })` | `PATCH /api/console/login-service/settings/runtime` | `LoginRuntimeSettingsDto` |
-| `listLoginTasksPage({ q,status,page,pageSize })` | `GET /api/console/login-service/tasks?...` | `PageResponse<LoginTaskDto>` |
-| `cancelLoginTask(id)` | `POST /api/console/login-service/tasks/:id/cancel` | `LoginTaskDto` |
-| `deleteLoginTask(id)` | `DELETE /api/console/login-service/tasks/:id` | `void` |
-| `retryLoginTask(id,{ ssoPassword,ssoType? })` | `POST /api/console/login-service/tasks/:id/retry` | `LoginTaskDto` |
 
 ## 6. 数据结构
 
@@ -282,11 +292,44 @@ interface ConsoleSession {
 关键枚举：
 
 - `SsoType`: `'azure' | 'custom'`
-- `LoginTaskStatus`: `'pending' | 'running' | 'success' | 'failed' | 'cancelled'`
+- `LoginTaskStatus`: `'pending' | 'running' | 'cancelling' | 'success' | 'failed' | 'cancelled'`
 - `CopilotOauthStatus`: `'valid' | 'expired' | 'missing' | 'refreshing' | 'failed'`
 - `EmuStatus`: `'active' | 'suspended' | 'deleted' | 'not_synced'`
 - `CopilotSeatStatus`: `'unknown' | 'assigned' | 'unassigned' | 'assign_failed' | 'remove_failed'`
 - `SsoUserBatchOperation`: `'sync_emu' | 'suspend_emu' | 'delete_emu' | 'delete_sso' | 'assign_copilot' | 'remove_copilot'`
+
+### 统一列表与批量操作
+
+`ManagedList` 提供 10 / 25 / 50 / 100 分页（默认 25）、多页时的页码跳转、稳定排序、筛选草稿/应用、URL hash 状态、跨页选择及全匹配排除项、列显隐、紧凑模式和表格内横向滚动。每页条数/列/密度写入本地偏好；选择和滚动现场仅在当前页面会话保留。缓存的列偏好优先于新默认配置。
+
+搜索/筛选、表格和分页位于同一容器。所有列表的批量操作区常驻，动作按钮、选择全部匹配记录、导出选中项和清除选择在空选择时也不隐藏；需要目标的操作在未选择记录时禁用，空间不足时自动换行。搜索和筛选始终保留，不随选择切换。全匹配选择保留排除项，全部选中后按钮保持显示并禁用；出现排除项后可再次点击全选恢复。View 只管理列和密度，Export 提供当前页/全部匹配的导出。SSO 用户的 CSV/GH 导入位于 Import，“同步时分配席位”常驻批量操作区，可在选择记录前设置。
+
+Login Tasks 的 Status 使用可多选下拉菜单，不再使用常驻列表框；未选表示全部状态，勾选或清空后点击 Apply filters 才会提交，URL 仍支持多个状态。Task 列直接显示完整 ID 并保留复制按钮，点击 ID 不会打开详情；任务详情和日志查看入口移至行内更多菜单的 Details。
+
+**默认手动快照，仅 SSO 新提交操作做有限完成跟踪**：空闲页面没有定时轮询、可见性/焦点恢复取数或实时模式。首次进入页面、打开详情、提交查询/翻页时正常读取；创建、编辑、删除等操作提交成功后回读一次当前相关数据。SSO 批量操作接口返回的是已受理，不代表后台执行完成，因此还会跟踪本次已确认提交（含手动恢复确认）的批次：GET 间隔从 1 秒逐步退避至 5 秒，每批最多跟踪 2 分钟，单次查询最多 15 秒；终态到达后自动回读列表和容量，不每次状态查询都重载列表。完成、读取失败/超时或离开页面时停止相应跟踪，超时不代表操作失败；提示通过 Refresh 查询，绝不自动重放。确认框打开或提交结果不确定期间暂停跟踪，返回页面不自动恢复旧批次的跟踪。Proxy、Login（包括运行中的任务和操作）、详情及其他页面仍保持手动快照。
+
+- 列表 Refresh 保留查询、分页、选择、滚动和列偏好，同时读取当前页面会话中尚未结束或提交结果不确定的批次。多个批次也只回读一次列表；Login Tasks 同时读取一次队列和汇总，各区单独报告读取失败。终态批次不重复请求。
+- 任务/账号详情使用 Refresh details；不再提供单独的操作结果面板或 Refresh status 按钮。日志仍通过 Preview/Download 显式读取。
+- 时间和耗时表示上次成功查询的快照，不是实时状态。后台服务仍会独立执行任务、重试和恢复；关闭详情不取消服务端执行。
+- 刷新期间保留已显示数据；失败保留上次成功获取时间，并明确提示数据可能过期，而不是清空为零条。手动刷新操作状态只执行 GET，不重新执行批次。
+
+批次由业务服务执行，Console 不保存业务状态。后台先冻结最多 1000 个目标：同步 GH login、分配席位、取消任务直接提交；删除、挂起 GH login 和移除席位只显示包含目标数量及影响范围的确认框，不展示完整预览页面。预览超过 10 分钟需重新生成，预览已丢失（过期或服务重启）时执行接口返回 `404 operation_not_found`（提示重新预览），而不是把它报成覆盖密码无效。重复提交同一预览由服务端返回当前状态，不会再次执行；普通操作提交失败可在原列表中 Retry submission，沿用原批次而不是重新生成目标。运行中目标的进度由服务端轮询下游确认，间隔逐步退避；同一目标连续 10 次读不到进度（或下游明确返回 404）会标记为 `interrupted` 并附上原因，不会无限停留在 `running`。
+
+SSO、Proxy 和 Login 提交后均不显示结果弹窗或 `Operation:` 内嵌面板：操作按钮在提交期间显示忙状态，接受后给出“已提交”的轻量提示，SSO 完成后另行通知。共享列表已移除 Last action 列，不会因提交或刷新操作结果而新增列；这是 Console 展示层变更，不改变业务服务的接口、数据结构或队列逻辑。操作错误、失败/中断目标及原因统一显示在可关闭的固定浮层中，长详情限高滚动，不挤动表格；相同错误不会因普通重绘反复弹出，显式 Refresh 可重新查看。成功提示自动消失，错误/警告保留至关闭；必要确认框中的表单错误仍留在框内。已提交不等于已完成。列表 Refresh 统一更新所有运行中批次，旧批次的完成不能覆盖较新操作的结果或取消其选择；失败/中断项继续保持选择，可直接再次点击原动作。跨页或筛选外的失败同样保留，Export 中保留最后一次操作的结果/失败项下载。
+
+网络或上游故障导致提交结果不确定时，保留原操作 ID 并阻止新建批次；使用 Refresh 查询原批次，或通过错误浮层中的 Retry submission 重试同一执行接口，避免重新冻结并重复执行。关闭提示不删除操作 ID、不解除保护，仍可通过 Refresh 恢复。切换管理页面仍保留非敏感操作快照和未确认的提交 ID，不保存密码、不自动发请求；整页重载、登出或会话过期会清空客户端状态。服务端结果丢失/过期时保留明确的目标级中断提示，不自动重放。批次结果只保存在服务进程内存中、结束后保留约 1 小时，没有历史列表；离开页面不取消已接受的操作。本交互不修改数据库结构或队列调度；现有 SSO 并发仍按批次计算，不代表新增了服务端跨批次互斥。
+
+重试和重新授权保留必要的凭据确认框。默认密码由服务端解析，单账号覆盖只保留在本次表单和执行内存，提交、关闭或退出后清除；不会保存到 URL、localStorage、日志或批次历史。提交失败时保留已输入的覆盖密码，成功后才清空。Azure/已改密账号必须覆盖，不能靠重试自动重置密码。Proxy 重新授权（单账号与批量）默认选择 Custom，重新打开也恢复此默认值，提交时显式携带 `ssoType: "custom"`，无需再次选择；Azure 账号仍需切换为 Azure 并填写覆盖密码。Proxy 不保存账号所属 SSO 提供方，API 仍要求传入 `ssoType`，缺省返回 `400 sso_type_required`。
+
+Export page / selected / matches 分别导出页、已选目标、完整保留范围，使用服务端一致读快照；选中导出最多 1000 行，全部匹配导出使用分块下载流。CSV 转义引号、换行和公式型单元格（纯数字不加前缀，避免负数列被破坏），不导出凭据。导出完整匹配范围时，服务端在开始导出时统计的行数通过 `X-Export-Matched-At-Start` 返回；与页面显示的总数不一致时列表会提示文件是生成时刻的快照。下载错误保留原 Console 页面；API 会话过期提示重新登录并保留查询现场。登出或会话过期会清空跨页选择和滚动现场，避免下一位管理员继承上一位的选择。
+
+Dashboard 使用 summary API；Recent tokens 明确只是近期保留请求的样本。Request Stats 使用服务端筛选分页，不再从最近 1000 条中本地过滤。所有管理表格中的用户名和身份直接展示，不提供关联页面跳转；请求错误不提供诊断跳转，用户/账号行不提供账号/任务跳转。队列、任务详情和批量结果中的身份及关联任务也只展示文本。详情、错误展开、复制、重试、重新授权和下载等实际操作保留；侧边导航、Dashboard 的完整列表入口、任务快捷筛选和并发设置入口仍可使用。
+
+Dashboard 的任务摘要固定展示 Identity、SSO user、Status、Failure；Dashboard 和账号详情的请求摘要固定展示 Identity、Path、Model、Outcome、Total、Failure，均使用紧凑布局。摘要组件不承担完整列表和选择操作；完整列表的列显隐、选择及密度设置仍由 `ManagedList` 提供。
+
+管理区通过 `.console-admin` 和共享 UI 组件统一尺寸、轻边框、焦点、表格、表单及弹窗；不影响登录/初始化页。普通内容卡片弱化阴影。工具栏、行内操作、更多菜单入口和复制等图标按钮使用有边框、浅底色的次级按钮，悬停、按下、展开、焦点和禁用状态明确区分；行内按钮保持紧凑，菜单内部的普通动作仍使用无框样式。主要提交操作保留实心按钮，危险操作保留警示色和明确的确认范围。宽表在自身容器滚动，状态标签保持内容宽度且不只靠颜色表达。
+
+`npm run test` 覆盖 server 和 web 状态逻辑；`npm run test:browser` 构建后运行 Playwright 交互回归，包括跨页操作、空闲零自动刷新请求、SSO 有限完成跟踪、显式刷新范围、可关闭且不改变布局的操作提示、管理页面响应式布局、记录无关联跳转、次级按钮边框对比度（至少 3:1）及交互状态，需要 Chromium、系统运行库和字体。浏览器测试使用隔离 mock 服务，不操作真实业务数据。根 README 提供隔离 `.env` 的多服务回归命令。
 
 ## 7. 代码结构
 
@@ -309,15 +352,21 @@ src/console/
         ├── main.tsx           # React 挂载入口
         ├── App.tsx            # 页面状态、路由 hash、所有管理页面与弹窗
         ├── api/               # 前端 API client：client/proxy/sso/login
-        ├── components/ui/     # Button/Input/Badge/Card/Dialog/Textarea
-        └── lib/format.ts      # 日期、数字、状态样式和 token 汇总格式化
+        ├── components/
+        │   ├── ManagedList.tsx     # 统一列表、查询、选择、导出与行内操作
+        │   ├── Operations.tsx     # useOperations、直接提交/必要确认与行内结果
+        │   ├── LoginTaskDetails.tsx # 任务、尝试和日志详情
+        │   └── ui/                # Button/Input/Select/Checkbox/Table/Dialog 等共享组件
+        └── lib/
+            ├── management.ts # 查询、选择和页面偏好
+            └── format.ts     # 日期、数字、状态样式和 token 汇总格式化
 ```
 
 ## 8. 开发提示
 
 - 入口定位：后端从 `src/server/index.ts` 看路由和中间件；前端从 `src/web/App.tsx` 的 `pages` 数组和 `AdminApp` 看页面入口。
-- 新增管理页面：先在 `Page` union 和 `pages` 数组加页面，再在 `AdminApp` 中挂载组件，API 调用放到 `src/web/api/*.ts`。
-- 新增上游调用：优先在对应 client 文件声明函数；如果是新服务，需要在 `apiProxy.ts`、`config.ts` 和 `.env.example` 增加 base URL 与转发挂载。
+- 新增管理页面：先在 `Page` union 和 `pages` 数组加页面，再在 `AdminApp` 中挂载组件；完整列表复用 `ManagedList`，批量及行内管理动作复用 `useOperations`。
+- 新增上游调用：列表查询沿用通用组件，专用调用放到对应 `src/web/api/*.ts` client，避免添加没有调用方的包装；如果是新服务，需要在 `apiProxy.ts`、`config.ts` 和 `.env.example` 增加 base URL 与转发挂载。
 - 调试认证：先看 `/api/console/setup`、`/api/console/me`；服务间 401/403 多半是 `INTERNAL_API_TOKEN` 与上游不一致。
 - 调试转发：设置 `LOG_LEVEL=debug` 或 `info`，查看 `[console:api-proxy]` 日志中的 target、method、suffix、status、durationMs。
 - 调试 Copilot 请求：在 proxy 日志中找到 `diagnosticId`，到 **Error Diagnostics** 查看逐行 headers、格式化 body 和 curl；大记录优先下载完整 `.log`，页面只做有限预览。

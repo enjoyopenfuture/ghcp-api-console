@@ -275,3 +275,11 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 - 调试 Copilot/AI Credits：确认 `GITHUB_COPILOT_SEAT_PAT`、`GITHUB_API_BASE_URL`、`ENTERPRISE_SLUG`；相关功能调用时才会校验 PAT。
 - 调试 SAML：确认 `BASE_URL`、`SP_ENTITY_ID`、`SP_ACS_URL`、`CERT_DIR`；证书文件缺失会导致服务启动失败。
 - `sync_emu` 批量操作使用 Console Settings 中的并发值，其他破坏性批量操作保持串行。
+
+## 异步管理与默认登录凭据
+
+Users 查询支持 `status`（EMU 状态）、`role`、`seatStatus`、更新时间 `from/to` 和稳定排序；`GET /api/users/summary` 返回全部保留用户的真实聚合。`GET /api/users/export` 导出一致快照的全部匹配项，`scope=page` 导出当前页；POST 同一路径传 `{ selection }` 导出至多 1000 个已选目标。
+
+`/api/users/operations` 提供 `POST /preview`、`POST /:id/execute`、`GET /:id` 和 `GET /:id/export`。选择可以是 `{ ids }` 或 `{ query, excludedIds }`；每批至多 1000，预览冻结目标并在 10 分钟后过期，执行时重新校验。预览与结果只保存在 SSO 进程内存中（结果在结束后保留约 1 小时），重复确认同一预览返回当前状态而不会再执行；浏览器关闭不停止已接受的工作，进程重启后批次状态丢失、不自动重放，以用户列表为准。业务仍复用 `runSsoUserBatch`，`sync_emu` 保留 runtime 并发与 SCIM 节流/重试，删除等操作保持串行和既有级联顺序。旧同步 `POST /api/users/batch` 保持兼容。
+
+`POST /internal/users/:ssoUser/login-credentials` 只允许携带内部认证的服务调用，使用 `Cache-Control: no-store`。它沿用既有默认密码候选策略，只验证现有用户的摘要，不创建用户、不重置密码；已改密或未知默认值返回 `409 password_override_required`。摘要校验在工作线程池异步执行，最多同时处理 4 个请求，繁忙时返回 `429 default_credentials_busy` 和 `Retry-After: 1`，不会无界排队阻塞普通 API。密码只向协调登录的 Proxy 返回，不进入 Console 转发路径、批次数据或导出。

@@ -1,25 +1,8 @@
 import type { AiCreditsUsageDto, BatchResult, CreateImportEmuPlanRequest, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUsersRequest, ImportEmuUserStatus, PageResponse, SsoRuntimeSettingsDto, SsoUserBatchRequest, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto, UpdateSsoRuntimeSettingsRequest } from '@ghcp/shared';
 import { api } from './client.js';
 
-export interface ListUsersQuery {
-  q?: string;
-  page?: number;
-  pageSize?: number;
-  sort?: string;
-  dir?: 'asc' | 'desc';
-}
-
-export function listSsoUsers(params: ListUsersQuery = {}): Promise<PageResponse<SsoUserDto>> {
-  const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== '') search.set(key, String(value));
-  }
-  const query = search.toString();
-  return api<PageResponse<SsoUserDto>>(`/api/console/sso/users${query ? `?${query}` : ''}`);
-}
-
-export function getSsoUserCapacity(): Promise<SsoUserCapacityDto> {
-  return api<SsoUserCapacityDto>('/api/console/sso/users/capacity');
+export function getSsoUserCapacity(signal?: AbortSignal): Promise<SsoUserCapacityDto> {
+  return api<SsoUserCapacityDto>('/api/console/sso/users/capacity', { signal });
 }
 
 export function getSsoRuntimeSettings(): Promise<SsoRuntimeSettingsDto> {
@@ -55,13 +38,13 @@ export function createEmuImportPlan(body: CreateImportEmuPlanRequest = {}): Prom
   });
 }
 
-export function listEmuImportPlanRows(planId: string, params: { page?: number; pageSize?: number; status?: ImportEmuUserStatus | '' } = {}): Promise<PageResponse<ImportEmuUserRow>> {
+export function listEmuImportPlanRows(planId: string, params: { page?: number; pageSize?: number; status?: ImportEmuUserStatus | '' } = {}, signal?: AbortSignal): Promise<PageResponse<ImportEmuUserRow>> {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== '') search.set(key, String(value));
   }
   const query = search.toString();
-  return api<PageResponse<ImportEmuUserRow>>(`/api/console/sso/users/emu/import/plans/${encodeURIComponent(planId)}/rows${query ? `?${query}` : ''}`);
+  return api<PageResponse<ImportEmuUserRow>>(`/api/console/sso/users/emu/import/plans/${encodeURIComponent(planId)}/rows${query ? `?${query}` : ''}`, { signal });
 }
 
 export function applyEmuImportPlan(planId: string): Promise<ImportEmuPlanDto> {

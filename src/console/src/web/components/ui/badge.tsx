@@ -12,5 +12,5 @@ export function Badge(props: HTMLAttributes<HTMLSpanElement> & { tone?: BadgeTon
     info: 'border-blue-200 bg-blue-50 text-blue-700',
     muted: 'border-slate-200 bg-white text-slate-500',
   };
-  return <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${tones[tone]} ${className}`} {...rest} />;
+  return <span className={`ui-badge ui-badge--${tone} inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${tones[tone]} ${className}`} {...rest} />;
 }

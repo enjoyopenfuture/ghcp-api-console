@@ -1,64 +1,29 @@
 import type {
   BatchResult,
   ClearProxyErrorDiagnosticsResponse,
-  DeleteProxyAccountResult,
   ImportCopilotOauthTokenRow,
-  PageResponse,
   ProxyAccountDto,
   ProxyErrorDiagnosticDetailDto,
-  ProxyErrorDiagnosticsListResponse,
   ProxyRequestStatDto,
   SsoType,
 } from '@ghcp/shared';
 import { api, downloadApi } from './client.js';
 
-export interface ListProxyAccountsQuery {
-  q?: string;
-  page?: number;
-  pageSize?: number;
-  sort?: string;
-  dir?: 'asc' | 'desc';
+export function getProxyAccount(identity: string, signal?: AbortSignal): Promise<ProxyAccountDto> {
+  return api<ProxyAccountDto>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}`, { signal });
 }
 
-export function listProxyAccounts(params: ListProxyAccountsQuery = {}): Promise<PageResponse<ProxyAccountDto>> {
-  const search = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== '') search.set(key, String(value));
-  }
-  const queryString = search.toString();
-  return api<PageResponse<ProxyAccountDto> | ProxyAccountDto[]>(`/api/console/proxy/accounts${queryString ? `?${queryString}` : ''}`)
-    .then((result) => {
-      if (!Array.isArray(result)) return result;
-      const page = Math.max(1, Math.trunc(params.page ?? 1));
-      const pageSize = Math.max(1, Math.trunc(params.pageSize ?? (result.length || 25)));
-      return {
-        items: result,
-        total: result.length,
-        page,
-        pageSize,
-      };
-    });
-}
-
-export function getProxyAccount(identity: string): Promise<ProxyAccountDto> {
-  return api<ProxyAccountDto>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}`);
-}
-
-export function deleteProxyAccount(identity: string): Promise<DeleteProxyAccountResult> {
-  return api<DeleteProxyAccountResult>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}`, { method: 'DELETE' });
-}
-
-export function listRequestStats(params: { identity?: string; limit?: number } = {}): Promise<ProxyRequestStatDto[]> {
+export function listRequestStats(params: { identity?: string; limit?: number } = {}, signal?: AbortSignal): Promise<ProxyRequestStatDto[]> {
   const search = new URLSearchParams();
   if (params.limit) search.set('limit', String(params.limit));
   if (params.identity) {
-    return api<ProxyRequestStatDto[]>(`/api/console/proxy/accounts/${encodeURIComponent(params.identity)}/request-stats${query(search)}`);
+    return api<ProxyRequestStatDto[]>(`/api/console/proxy/accounts/${encodeURIComponent(params.identity)}/request-stats${query(search)}`, { signal });
   }
-  return api<ProxyRequestStatDto[]>(`/api/console/proxy/request-stats${query(search)}`);
+  return api<ProxyRequestStatDto[]>(`/api/console/proxy/request-stats${query(search)}`, { signal });
 }
 
-export function reauthorizeCopilotOauth(identity: string, body: { ssoPassword: string; ssoType: SsoType }): Promise<ProxyAccountDto | undefined> {
-  return api<ProxyAccountDto | undefined>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}/copilot-oauth/reauthorize`, { method: 'POST', body: JSON.stringify(body) });
+export function reauthorizeCopilotOauth(identity: string, body: { ssoPassword?: string; ssoType?: SsoType; credentialMode?: 'default' | 'override' }): Promise<ProxyAccountDto> {
+  return api<ProxyAccountDto>(`/api/console/proxy/accounts/${encodeURIComponent(identity)}/copilot-oauth/reauthorize`, { method: 'POST', body: JSON.stringify(body) });
 }
 
 export function importCopilotOauthTokens(csvText: string): Promise<BatchResult<ImportCopilotOauthTokenRow>> {
@@ -68,19 +33,12 @@ export function importCopilotOauthTokens(csvText: string): Promise<BatchResult<I
   });
 }
 
-export function listErrorDiagnostics(params: { page?: number; pageSize?: number } = {}): Promise<ProxyErrorDiagnosticsListResponse> {
-  const search = new URLSearchParams();
-  if (params.page) search.set('page', String(params.page));
-  if (params.pageSize) search.set('pageSize', String(params.pageSize));
-  return api<ProxyErrorDiagnosticsListResponse>(`/api/console/proxy/error-diagnostics${query(search)}`);
-}
-
-export function getErrorDiagnostic(id: string): Promise<ProxyErrorDiagnosticDetailDto> {
-  return api<ProxyErrorDiagnosticDetailDto>(`/api/console/proxy/error-diagnostics/${encodeURIComponent(id)}`);
+export function getErrorDiagnostic(id: string, signal?: AbortSignal): Promise<ProxyErrorDiagnosticDetailDto> {
+  return api<ProxyErrorDiagnosticDetailDto>(`/api/console/proxy/error-diagnostics/${encodeURIComponent(id)}`, { signal });
 }
 
 export function downloadErrorDiagnostic(id: string): Promise<{ blob: Blob; filename: string }> {
-  return downloadApi(`/api/console/proxy/error-diagnostics/${encodeURIComponent(id)}/download`);
+  return downloadApi(`/api/console/proxy/error-diagnostics/${encodeURIComponent(id)}/download`, { fallbackFilename: 'proxy-error-diagnostic.log' });
 }
 
 export function clearErrorDiagnostics(): Promise<ClearProxyErrorDiagnosticsResponse> {

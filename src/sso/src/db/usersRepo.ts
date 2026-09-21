@@ -1,5 +1,5 @@
-import type { CopilotSeatOperation, CopilotSeatStatus, EmuStatus, PageResponse, SsoUserDto } from '@ghcp/shared';
-import { nowIso, pageResponse } from '@ghcp/shared';
+import type { CopilotSeatOperation, CopilotSeatStatus, EmuStatus, ManagementQuery, ManagementSummary, PageResponse, SsoUserDto } from '@ghcp/shared';
+import { HttpApiError, LIKE_ESCAPE_CLAUSE, likeContains, nowIso, pageResponse } from '@ghcp/shared';
 import { getDb } from './connection.js';
 import { readMaxSsoUsers } from './runtimeSettingsRepo.js';
 
@@ -25,13 +25,7 @@ interface UserRow {
   updated_at: string;
 }
 
-export interface UserListQuery {
-  q?: string;
-  page?: number;
-  pageSize?: number;
-  sort?: 'ssoUser' | 'email' | 'role' | 'emuStatus' | 'createdAt';
-  dir?: 'asc' | 'desc';
-}
+export interface UserListQuery extends ManagementQuery { }
 
 export class SsoUserLimitReachedError extends Error {
   constructor(
@@ -43,19 +37,44 @@ export class SsoUserLimitReachedError extends Error {
   }
 }
 
-export function listUsers(query: UserListQuery = {}): PageResponse<SsoUserDto> {
-  const page = Math.max(1, Math.trunc(query.page ?? 1));
+export function listUsers(query: UserListQuery = {}, database = getDb()): PageResponse<SsoUserDto> {
+  let page = Math.max(1, Math.trunc(query.page ?? 1));
   const pageSize = Math.max(1, Math.min(Math.trunc(query.pageSize ?? 25), 100));
   const q = query.q?.trim();
+  if (query.sort && !['ssoUser', 'email', 'role', 'emuStatus', 'createdAt', 'updatedAt'].includes(query.sort)) {
+    throw new HttpApiError(400, 'invalid_sort', 'Unknown SSO user sort field.');
+  }
   const sort = sortColumn(query.sort);
   const dir = query.dir === 'desc' ? 'DESC' : 'ASC';
-  const where = q ? 'WHERE sso_user LIKE ? OR email LIKE ? OR gh_login LIKE ?' : '';
-  const args = q ? [`%${q}%`, `%${q}%`, `%${q}%`] : [];
-  const total = (getDb().prepare(`SELECT COUNT(*) AS count FROM sso_users ${where}`).get(...args) as { count: number }).count;
-  const rows = getDb()
-    .prepare(`SELECT * FROM sso_users ${where} ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`)
+  const clauses = q ? [`(sso_user LIKE ? ${LIKE_ESCAPE_CLAUSE} OR email LIKE ? ${LIKE_ESCAPE_CLAUSE} OR gh_login LIKE ? ${LIKE_ESCAPE_CLAUSE})`] : [];
+  const args = q ? [likeContains(q), likeContains(q), likeContains(q)] : [];
+  if (query.ids?.length) { clauses.push(`sso_user IN (${query.ids.map(() => '?').join(',')})`); args.push(...query.ids); }
+  const filters = [
+    ['status', 'emu_status', ['active', 'suspended', 'deleted', 'not_synced']],
+    ['seatStatus', 'copilot_seat_status', ['unknown', 'assigned', 'unassigned', 'assign_failed', 'remove_failed']],
+    ['role', 'role', ['user', 'admin']],
+  ] as const;
+  for (const [key, column, allowed] of filters) {
+    if (!query[key]) continue;
+    const values = query[key].split(',');
+    if (values.some((value) => !allowed.some((entry) => entry === value))) throw new HttpApiError(400, 'invalid_filter', `Invalid ${key}.`);
+    clauses.push(`${column} IN (${values.map(() => '?').join(',')})`);
+    args.push(...values);
+  }
+  if (query.from) { clauses.push('updated_at >= ?'); args.push(query.from); }
+  if (query.to) { clauses.push('updated_at < ?'); args.push(query.to); }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const total = (database.prepare(`SELECT COUNT(*) AS count FROM sso_users ${where}`).get(...args) as { count: number }).count;
+  page = Math.min(page, Math.max(1, Math.ceil(total / pageSize)));
+  const rows = database
+    .prepare(`SELECT * FROM sso_users ${where} ORDER BY ${sort} ${dir}, sso_user ${dir} LIMIT ? OFFSET ?`)
     .all(...args, pageSize, (page - 1) * pageSize) as UserRow[];
   return pageResponse(rows.map(mapRow).map(toDto), total, page, pageSize);
+}
+
+export function summarizeUsers(): ManagementSummary {
+  const rows = getDb().prepare('SELECT emu_status AS status, COUNT(*) AS count FROM sso_users GROUP BY emu_status').all() as Array<{ status: string; count: number }>;
+  return { total: rows.reduce((total, row) => total + row.count, 0), counts: Object.fromEntries(rows.map((row) => [row.status, row.count])), updatedAt: nowIso() };
 }
 
 export function listAllUsers(): SsoUserRecord[] {
@@ -225,6 +244,8 @@ function sortColumn(sort: UserListQuery['sort']): string {
       return 'emu_status';
     case 'createdAt':
       return 'created_at';
+    case 'updatedAt':
+      return 'updated_at';
     default:
       return 'sso_user';
   }

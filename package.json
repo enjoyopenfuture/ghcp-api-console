@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "workspaces": [
     "src/packages/*",
     "src/proxy",
@@ -43,6 +46,7 @@
     "cookie-session": "^2.1.0",
     "dotenv": "^16.4.7",
     "express": "^5.2.1",
+    "lucide-react": "^1.47.0",
     "multer": "^2.1.1",
     "mysql2": "^3.24.2",
     "playwright": "^1.60.0",

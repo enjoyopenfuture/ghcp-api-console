@@ -7,6 +7,8 @@ import type { RuntimeAuthConfig } from '../config.js';
 import type { AccountLogger } from '../tasks/accountLogger.js';
 import type { AccountCredentials, AuthStrategy } from './types.js';
 import type { DeviceCodeResponse } from './deviceFlow.js';
+import { HttpApiError } from '@ghcp/shared';
+import { setTimeout as delay } from 'node:timers/promises';
 
 type LogFields = Record<string, unknown>;
 
@@ -36,14 +38,32 @@ export class HeadlessPlaywrightAuthStrategy implements AuthStrategy {
     private readonly logger: AccountLogger,
   ) {}
 
-  async authorize(device: DeviceCodeResponse): Promise<void> {
+  async authorize(device: DeviceCodeResponse, signal?: AbortSignal): Promise<void> {
     let stage = 'launch-browser';
     let browser: Browser | undefined;
     let context: BrowserContext | undefined;
     let page: Page | undefined;
     let traceStarted = false;
+    let closing: Promise<void> | undefined;
+    const closeBrowser = async () => {
+      const instance = browser;
+      if (!instance) return;
+      while (true) {
+        try { await instance.close(); return; }
+        catch (err) {
+          this.logger.warn('cancel', 'Browser cleanup failed; retrying while it remains connected', { error: errorMessage(err) });
+          if (!instance.isConnected()) return;
+          await delay(1000);
+        }
+      }
+    };
+    const abort = () => {
+      if (browser && !closing) closing = closeBrowser();
+    };
+    signal?.addEventListener('abort', abort, { once: true });
 
     try {
+      signal?.throwIfAborted();
       registerStealth(this.logger);
       this.logger.info(stage, 'Starting headless browser authorization', {
         strategy: this.name,
@@ -58,6 +78,10 @@ export class HeadlessPlaywrightAuthStrategy implements AuthStrategy {
         headless: this.options.headless,
         args: ['--disable-blink-features=AutomationControlled'],
       });
+      if (signal?.aborted) {
+        abort();
+        signal.throwIfAborted();
+      }
       context = await browser.newContext({
         locale: 'en-US',
         viewport: { width: 1365, height: 768 },
@@ -99,6 +123,7 @@ export class HeadlessPlaywrightAuthStrategy implements AuthStrategy {
         url: safeUrl(page.url()),
       });
     } catch (err) {
+      if (signal?.aborted) throw signal.reason;
       const diagnostics = await this.captureFailure(stage, page, context, traceStarted);
       if (diagnostics.traceStopped) traceStarted = false;
       this.logger.error(stage, 'Automatic authorization failed', {
@@ -106,14 +131,16 @@ export class HeadlessPlaywrightAuthStrategy implements AuthStrategy {
         error: errorMessage(err),
         ...diagnostics.fields,
       });
-      throw new Error(`Automatic device-flow authorization failed during ${stage}: ${errorMessage(err)}`);
+      throw new HttpApiError(502, `browser_${stage.replaceAll('-', '_')}`, `Automatic device-flow authorization failed during ${stage}: ${errorMessage(err)}`);
     } finally {
+      signal?.removeEventListener('abort', abort);
       if (context && traceStarted) {
         await context.tracing.stop().catch((err: unknown) => {
           this.logger.warn('debug-artifacts', 'Failed to stop tracing cleanly', { error: errorMessage(err) });
         });
       }
-      if (browser) await browser.close();
+      if (closing) await closing;
+      else await closeBrowser();
     }
   }
 

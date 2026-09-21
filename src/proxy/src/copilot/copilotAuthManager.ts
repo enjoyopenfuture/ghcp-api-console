@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { HttpApiError, type EnsureSsoUserResponse, type SsoType } from '@ghcp/shared';
+import { HttpApiError, readLoginCredentials, type CreateLoginTaskRequest, type EnsureSsoUserResponse, type LoginTaskDto, type SsoType } from '@ghcp/shared';
 import {
-  beginCopilotOauthAuthorization,
   claimIdentityInitialization,
   createAccount,
   failCopilotOauthAuthorization,
@@ -14,6 +13,7 @@ import { createLoginTask } from '../clients/loginClient.js';
 import { config } from '../config.js';
 import { Logger } from '../logger.js';
 import type { CopilotAuthContext } from './copilotAuth.js';
+import { prepareLoginAuthorization } from '../accounts/loginAuthorization.js';
 
 export class CopilotAuthNotReadyError extends Error {
   constructor(
@@ -61,27 +61,31 @@ class CopilotAuthManager {
     };
   }
 
-  async triggerOauthRefresh(identity: string, options: { ssoPassword?: string; ssoType?: SsoType } = {}): Promise<void> {
+  async triggerOauthRefresh(identity: string, options: { ssoPassword?: string; ssoType?: SsoType; credentialMode?: 'default' | 'override' } = {}): Promise<LoginTaskDto> {
     const account = await getAccount(identity);
     if (!account) throw new Error(`Unknown identity "${identity}".`);
     if (!account.ssoUser) throw new Error(`Identity "${identity}" is missing an SSO user.`);
     if (!account.ghLogin) throw new Error(`Identity "${identity}" is missing a GitHub login.`);
-    if (!options.ssoPassword) throw new Error('ssoPassword is required to reauthorize Copilot OAuth.');
     const oauthAttemptId = randomUUID();
-    if (!await beginCopilotOauthAuthorization(identity, oauthAttemptId)) {
-      throw new Error(`Unknown identity "${identity}".`);
-    }
-    try {
-      await createLoginTask({
-        identity,
-        ssoUser: account.ssoUser,
-        ssoPassword: options.ssoPassword,
-        ghLogin: account.ghLogin,
-        oauthAttemptId,
-        ssoType: options.ssoType ?? 'custom',
+    const payload = await prepareLoginAuthorization(identity, oauthAttemptId, {
+      ...readLoginCredentials(options), ssoUser: account.ssoUser, ghLogin: account.ghLogin,
+      ssoType: options.ssoType ?? 'custom', force: true,
+    });
+    return this.submitLogin(payload);
+  }
+
+  private async submitLogin(payload: CreateLoginTaskRequest): Promise<LoginTaskDto> {
+    try { return await createLoginTask(payload); }
+    catch (err) {
+      // Login did not accept the task, so the account must not stay `refreshing`. The rollback is
+      // fenced on the attempt id: if Login did accept it and already wrote the token, this is a no-op.
+      await failCopilotOauthAuthorization(payload.identity, payload.oauthAttemptId).catch((rollbackErr: unknown) => {
+        this.logger.error('rollback-failed', 'Could not mark the authorization attempt failed after a rejected Login submission; reauthorize the account manually if it stays refreshing', {
+          identity: payload.identity, oauthAttemptId: payload.oauthAttemptId,
+          submissionError: err instanceof Error ? err.message : String(err),
+          error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+        });
       });
-    } catch (err) {
-      await failCopilotOauthAuthorization(identity, oauthAttemptId);
       throw err;
     }
   }
@@ -129,31 +133,21 @@ class CopilotAuthManager {
     const synced = await syncEmuUser(ensured.user.ssoUser, { assignCopilotSeat: true });
     if (!synced.ghLogin) throw new Error(`SSO user "${ensured.user.ssoUser}" did not return a GH login.`);
     const oauthAttemptId = randomUUID();
+    const ssoPassword = ensured.passwordForLogin;
     await createAccount({
       identity,
       ssoUser: ensured.user.ssoUser,
       ghLogin: synced.ghLogin,
-      copilotOauthStatus: 'refreshing',
-      copilotOauthAttemptId: oauthAttemptId,
+      copilotOauthStatus: ssoPassword ? 'missing' : 'failed',
     });
-    const ssoPassword = ensured.passwordForLogin;
     if (!ssoPassword) {
-      await failCopilotOauthAuthorization(identity, oauthAttemptId);
       throw new Error(`SSO password is required to initialize identity "${identity}"; reauthorize it from Console with an explicit password.`);
     }
-    try {
-      await createLoginTask({
-        identity,
-        ssoUser: ensured.user.ssoUser,
-        ssoPassword,
-        ghLogin: synced.ghLogin,
-        oauthAttemptId,
-        ssoType: 'custom',
-      });
-    } catch (err) {
-      await failCopilotOauthAuthorization(identity, oauthAttemptId);
-      throw err;
-    }
+    // The row was created (or re-created) by this initialization, so there is no earlier attempt to respect.
+    const payload = await prepareLoginAuthorization(identity, oauthAttemptId, {
+      credentialMode: 'override', ssoPassword, ssoUser: ensured.user.ssoUser, ghLogin: synced.ghLogin, ssoType: 'custom', force: true,
+    });
+    await this.submitLogin(payload);
   }
 }
 

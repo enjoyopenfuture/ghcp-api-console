@@ -26,5 +26,20 @@ export function redactSensitiveValue(value: unknown): unknown {
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
     redacted[key] = shouldRedact(key) ? '<redacted>' : redactSensitiveValue(child);
   }
+
   return redacted;
+}
+
+export function redactSecrets(text: string, secrets: readonly string[]): string {
+  const variants = new Set<string>();
+  for (const secret of secrets) {
+    if (!secret) continue;
+    let value = secret;
+    for (let level = 0; level < 3; level++) {
+      variants.add(value);
+      value = JSON.stringify(value).slice(1, -1);
+    }
+  }
+  for (const value of [...variants].sort((a, b) => b.length - a.length)) text = text.replaceAll(value, '<redacted>');
+  return text;
 }

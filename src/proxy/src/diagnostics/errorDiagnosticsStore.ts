@@ -6,8 +6,10 @@ import type {
   ProxyErrorDiagnosticDetailDto,
   ProxyErrorDiagnosticRecordDto,
   ProxyErrorDiagnosticsListResponse,
+  ManagementQuery,
 } from '@ghcp/shared';
 import { formatDiagnosticRecord, parseDiagnosticLog } from './humanDiagnosticFormat.js';
+import { HttpApiError } from '@ghcp/shared';
 
 const SHARED_INSTANCES_DIR = 'instances';
 const SHARED_CLEAR_CUTOFF_FILE = 'diagnostics.clear-cutoff.json';
@@ -27,6 +29,21 @@ export class ErrorDiagnosticsDisabledError extends Error {
     super('Proxy error diagnostics collection is disabled.');
     this.name = 'ErrorDiagnosticsDisabledError';
   }
+
+}
+
+function matchesDiagnostic(record: ProxyErrorDiagnosticsListResponse['items'][number], query: ManagementQuery): boolean {
+  if (query.ids && !query.ids.includes(record.id)) return false;
+  if (query.q && !`${record.id} ${record.identity} ${record.path} ${record.model ?? ''}`.toLowerCase().includes(query.q.toLowerCase())) return false;
+  if (query.identity && record.identity !== query.identity) return false;
+  if (query.model && !(record.model ?? '').toLowerCase().includes(query.model.toLowerCase())) return false;
+  if (query.status && String(record.status) !== query.status) return false;
+  if (query.failureCode && record.failureKind !== query.failureCode) return false;
+  const timestamp = asSortTimestamp(record.timestamp);
+  if ((query.from || query.to) && !Number.isFinite(timestamp)) return false;
+  if (query.from && timestamp < Date.parse(query.from)) return false;
+  if (query.to && timestamp >= Date.parse(query.to)) return false;
+  return true;
 }
 
 export class ErrorDiagnosticsStore {
@@ -54,7 +71,7 @@ export class ErrorDiagnosticsStore {
     });
   }
 
-  list(page = 1, pageSize = 25): Promise<ProxyErrorDiagnosticsListResponse> {
+  list(page = 1, pageSize = 25, query: ManagementQuery = {}): Promise<ProxyErrorDiagnosticsListResponse> {
     const normalizedPage = Math.max(1, Math.trunc(page));
     const normalizedPageSize = Math.min(100, Math.max(1, Math.trunc(pageSize)));
     if (!this.options.enabled) {
@@ -67,27 +84,39 @@ export class ErrorDiagnosticsStore {
         pageSize: normalizedPageSize,
       });
     }
+    return this.snapshot().then((items) => this.pageSnapshot(items, { ...query, page: normalizedPage, pageSize: normalizedPageSize }));
+  }
+
+  snapshot(): Promise<ProxyErrorDiagnosticsListResponse['items']> {
+    if (!this.options.enabled) throw new HttpApiError(503, 'error_diagnostics_disabled', 'Proxy error diagnostics collection is disabled.');
     return this.serialized(async () => {
-      if (this.sharedModeEnabled()) return this.listShared(normalizedPage, normalizedPageSize);
-      const start = (normalizedPage - 1) * normalizedPageSize;
       const items: ProxyErrorDiagnosticsListResponse['items'] = [];
-      let total = 0;
-      await this.visitNewestFirst((record) => {
-        if (total >= start && items.length < normalizedPageSize) {
-          const { content: _content, ...summary } = record;
-          items.push(summary);
-        }
-        total += 1;
-      });
-      return {
-        enabled: true,
-        redacted: this.options.redacted,
-        items,
-        total,
-        page: normalizedPage,
-        pageSize: normalizedPageSize,
+      const cutoff = this.sharedModeEnabled() ? await this.readSharedClearCutoff() : undefined;
+      const collect = (record: ProxyErrorDiagnosticDetailDto) => {
+        if (cutoff !== undefined && recordAtOrBeforeCutoff(record, cutoff)) return;
+        const { content: _content, ...summary } = record;
+        items.push(summary);
       };
+      if (this.sharedModeEnabled()) await this.visitSharedRecords(collect);
+      else await this.visitNewestFirst(collect);
+      return items;
     });
+  }
+
+  pageSnapshot(source: ProxyErrorDiagnosticsListResponse['items'], query: ManagementQuery): ProxyErrorDiagnosticsListResponse {
+    if (query.status && !/^[1-5]\d\d$/.test(query.status)) throw new HttpApiError(400, 'invalid_status', 'HTTP status must be a three-digit status code.');
+    if (query.failureCode && !['http', 'fetch', 'stream'].includes(query.failureCode)) throw new HttpApiError(400, 'invalid_failure_kind', 'Unknown diagnostic failure kind.');
+    const sort = (['timestamp', 'identity', 'model', 'status', 'failureKind'] as const).find((key) => key === (query.sort ?? 'timestamp'));
+    if (!sort) throw new HttpApiError(400, 'invalid_sort', 'Unknown diagnostic sort field.');
+    const direction = query.dir === 'asc' ? 1 : -1;
+    const items = source.filter((item) => matchesDiagnostic(item, query)).sort((left, right) => {
+      if (sort === 'timestamp') return -direction * compareRecordsNewestFirst(left, right);
+      const a = left[sort]; const b = right[sort];
+      return direction * ((typeof a === 'number' && typeof b === 'number' ? a - b : String(a ?? '').localeCompare(String(b ?? ''))) || left.id.localeCompare(right.id));
+    });
+    const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 25));
+    const page = Math.min(Math.max(1, query.page ?? 1), Math.max(1, Math.ceil(items.length / pageSize)));
+    return { enabled: true, redacted: this.options.redacted, items: items.slice((page - 1) * pageSize, page * pageSize), total: items.length, page, pageSize };
   }
 
   get(id: string): Promise<ProxyErrorDiagnosticDetailDto | undefined> {
@@ -166,26 +195,6 @@ export class ErrorDiagnosticsStore {
         if (stop?.()) return;
       }
     }
-  }
-
-  private async listShared(page: number, pageSize: number): Promise<ProxyErrorDiagnosticsListResponse> {
-    const clearCutoff = await this.readSharedClearCutoff();
-    const summaries: ProxyErrorDiagnosticsListResponse['items'] = [];
-    await this.visitSharedRecords((record) => {
-      if (clearCutoff !== undefined && recordAtOrBeforeCutoff(record, clearCutoff)) return;
-      const { content: _content, ...summary } = record;
-      summaries.push(summary);
-    });
-    summaries.sort(compareRecordsNewestFirst);
-    const start = (page - 1) * pageSize;
-    return {
-      enabled: true,
-      redacted: this.options.redacted,
-      items: summaries.slice(start, start + pageSize),
-      total: summaries.length,
-      page,
-      pageSize,
-    };
   }
 
   private async getShared(id: string): Promise<ProxyErrorDiagnosticDetailDto | undefined> {

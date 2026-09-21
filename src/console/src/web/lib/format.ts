@@ -45,6 +45,7 @@ export function statusTone(status?: CopilotOauthStatus | CopilotSeatStatus | Emu
     case 'refreshing':
     case 'running':
     case 'pending':
+    case 'cancelling':
     case 'pending_create':
     case 'pending_update':
       return 'info';

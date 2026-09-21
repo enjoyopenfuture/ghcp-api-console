@@ -20,7 +20,7 @@
 - **业务调用流量**只进入 `proxy`。调用方携带 `API_KEY` 和身份头，`proxy` 负责找到或初始化该身份对应的账号，再转发到 GitHub Copilot API。
 - **账号初始化**由 `proxy` 协调。未知 identity 首次请求通常返回 `202 account_initializing`，后台由 `proxy` 调 `sso` 确保 SSO 用户/同步 EMU，再由 `proxy` 调 `login` 创建登录任务；`login` 成功后把 Copilot OAuth token 回写给 `proxy`。
 - **后台运维流量**进入 `console`。浏览器只访问 `/api/console/**`，由 console 服务端补充 `X-Internal-Token` 后转发给 `proxy`、`sso`、`login`。
-- **跨服务契约**集中在 `packages/shared/src/contracts.ts` 和 `api.ts`，避免各服务重复定义 DTO、分页、批处理和错误结构。
+- **跨服务契约**集中在 `packages/shared/src/contracts.ts`、`api.ts` 和 `management.ts`，避免各服务重复定义 DTO、分页、管理查询、选择范围和错误结构。
 
 ## 2. 软件架构
 
@@ -243,12 +243,14 @@ curl http://localhost:8002/healthz
 | `GET` | `/api/tasks` | 查询最近任务或分页搜索任务。 |
 | `POST` | `/api/tasks` | 创建登录任务，返回 `202 LoginTaskDto`。 |
 | `GET` | `/api/tasks/:id` | 查看单个任务。 |
-| `POST` | `/api/tasks/:id/cancel` | 取消 pending/running 任务。 |
-| `POST` | `/api/tasks/:id/retry` | 复用原任务信息并重新提供密码后重试。 |
+| `POST` | `/api/tasks/:id/cancel` | 取消 pending/running 任务；执行中保持 cancelling，直到浏览器资源释放后再标记取消并通知 Proxy。 |
+| `POST` | `/api/tasks/:id/retry` | 保留任务 ID，创建新 attempt；显式选择服务端默认凭据或提供本次覆盖密码。 |
 | `DELETE` | `/api/tasks/:id` | 删除 success/failed/cancelled 任务。 |
 | `GET/PATCH` | `/api/settings/runtime` | 读取/更新 Login runtime settings；更新使用 `expectedVersion` 乐观锁。 |
 
 边界：`login` 没有面向终端用户的 UI，也不维护最终账号状态；成功/失败结果都回写给 `proxy`。
+
+列表批量操作使用 `/api/tasks/operations`（批次状态仅在进程内存中）；上述单任务接口继续保留兼容。启动时由 `tasks/recovery.ts` 把未完成任务标记为中断并通知 Proxy 放弃对应 attempt，不自动重新执行登录。
 
 ### 5.5 console
 
@@ -263,6 +265,8 @@ Console 自身接口：
 | `/api/console/login-service/**` | 转发到 `LOGIN_BASE_URL/api/**`。 |
 
 边界：Console 只保存管理员文件，不保存 proxy/sso/login 的业务数据；浏览器不直接持有 `INTERNAL_API_TOKEN`。
+
+完整管理列表通过 `ManagedList` 直接读取服务端分页，行内与批量管理操作复用 `useOperations`；专用 API client 只保留摘要、详情、设置和导入等调用。Dashboard 与账号详情使用固定紧凑摘要表，完整列表仍支持列显隐、选择和密度设置。所有页面均为手动快照，不做定时轮询或切回页面自动刷新；这不影响后台服务独立执行和恢复任务。具体调用边界见 [Console README](./console/README.md)。
 
 ### 5.6 mock-github
 
@@ -305,7 +309,7 @@ Console 自身接口：
 | `CopilotOauthStatus` | `valid`、`expired`、`missing`、`refreshing`、`failed` |
 | `EmuStatus` | `active`、`suspended`、`deleted`、`not_synced` |
 | `CopilotSeatStatus` | `unknown`、`assigned`、`unassigned`、`assign_failed`、`remove_failed` |
-| `LoginTaskStatus` | `pending`、`running`、`success`、`failed`、`cancelled` |
+| `LoginTaskStatus` | `pending`、`running`、`cancelling`、`success`、`failed`、`cancelled` |
 | `SsoType` | `azure`、`custom` |
 
 ## 7. 代码结构
@@ -324,7 +328,7 @@ src/
     src/db/                       # 用户、预算、导入计划、事件日志
   login/
     src/server.ts                 # /api/tasks、/api/settings/runtime
-    src/tasks/                    # 内存队列、runtime concurrency、runner、账号日志
+    src/tasks/                    # 队列、runtime concurrency、runner、启动恢复、尝试日志
     src/auth/                     # device flow、Playwright 登录策略
   console/
     src/server/                   # 控制台登录、静态资源、API proxy
@@ -343,7 +347,7 @@ src/
 
 - **改 API 或 DTO**：先改对应服务 route/repo，再同步 `packages/shared/src/contracts.ts`，最后更新 console 前端 API client 和页面。
 - **改数据库字段**：更新服务 `db/migrations.ts`、repo row mapper、DTO、README。
-- **新增服务间调用**：上游新增 route，下游新增 `clients/*Client.ts`；内部调用统一使用 `JsonHttpClient` 和 `X-Internal-Token`。
+- **新增服务间调用**：上游新增 route，下游在 `clients/*Client.ts` 添加有实际调用方的包装；内部调用统一使用带超时的 `JsonHttpClient` 和 `X-Internal-Token`。浏览器请求和自动登录流程的取消信号由各自调用链处理。
 - **改登录流程**：优先通过 `login` 的 `AUTH_*_SELECTOR` 和 debug 配置验证；确认是流程变化后再改 `HeadlessPlaywrightAuthStrategy.ts`。
 - **排查转发问题**：从 `console` Network 看 `/api/console/**`，再看 `[console:api-proxy]` 日志和上游服务日志。
 - **排查 Copilot 上游错误**：先用控制台日志中的 `diagnosticId` 定位，再到 Console **Error Diagnostics** 查看或下载完整失败现场。

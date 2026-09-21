@@ -10,3 +10,390 @@
 body {
   margin: 0;
 }
+
+.console-admin {
+  --ui-canvas: #f8fafc;
+  --ui-surface: #ffffff;
+  --ui-surface-muted: #f8fafc;
+  --ui-surface-hover: #f1f5f9;
+  --ui-surface-selected: #eff6ff;
+  --ui-border: #e2e8f0;
+  --ui-border-control: #8190a3;
+  --ui-border-control-hover: #64748b;
+  --ui-text: #0f172a;
+  --ui-text-secondary: #475569;
+  --ui-text-muted: #64748b;
+  --ui-primary: #0f172a;
+  --ui-primary-hover: #334155;
+  --ui-danger: #b91c1c;
+  --ui-danger-hover: #991b1b;
+  --ui-danger-surface: #fef2f2;
+  --ui-danger-border: #ef4444;
+  --ui-warning: #92400e;
+  --ui-warning-surface: #fffbeb;
+  --ui-warning-border: #b45309;
+  --ui-focus: #2563eb;
+  --ui-link: #1d4ed8;
+  --ui-radius: 0.375rem;
+  --ui-radius-panel: 0.5rem;
+  --ui-space-1: 0.25rem;
+  --ui-space-2: 0.5rem;
+  --ui-space-3: 0.75rem;
+  --ui-font-size: 0.875rem;
+  --ui-font-size-small: 0.75rem;
+  --ui-control-height: 2.25rem;
+  --ui-control-height-small: 2rem;
+  --ui-shadow-popover: 0 8px 24px rgb(15 23 42 / 12%), 0 2px 6px rgb(15 23 42 / 6%);
+  --ui-shadow-dialog: 0 20px 60px rgb(15 23 42 / 20%);
+  color: var(--ui-text);
+  background: var(--ui-canvas);
+}
+
+.console-admin .ui-button {
+  height: var(--ui-control-height);
+  flex-shrink: 0;
+  border-radius: var(--ui-radius);
+  padding-block: 0;
+  font-size: var(--ui-font-size);
+  line-height: 1.25rem;
+  white-space: nowrap;
+  text-decoration: none;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.console-admin .ui-button--sm {
+  height: var(--ui-control-height-small);
+  padding-inline: 0.625rem;
+}
+
+.console-admin .ui-button--icon {
+  width: var(--ui-control-height-small);
+  height: var(--ui-control-height-small);
+  padding: 0;
+}
+
+.console-admin .ui-button--primary {
+  color: white;
+  background: var(--ui-primary);
+}
+
+.console-admin .ui-button--primary:hover:not(:disabled) {
+  background: var(--ui-primary-hover);
+}
+
+.console-admin :is(.ui-button--secondary, .ui-action-card) {
+  color: var(--ui-text);
+  border-color: var(--ui-border-control);
+  background: var(--ui-surface-muted);
+}
+
+.console-admin :is(.ui-button--secondary, .ui-action-card):hover:not(:disabled) {
+  border-color: var(--ui-border-control-hover);
+  background: var(--ui-surface-hover);
+}
+
+.console-admin :is(.ui-button--secondary, .ui-action-card):active:not(:disabled),
+.console-admin .ui-button--secondary[aria-expanded="true"]:not(:disabled) {
+  border-color: var(--ui-border-control-hover);
+  background: var(--ui-border);
+}
+
+.console-admin .ui-button--ghost {
+  color: var(--ui-text-secondary);
+  background: transparent;
+}
+
+.console-admin .ui-button--ghost:hover:not(:disabled) {
+  color: var(--ui-text);
+  background: var(--ui-surface-hover);
+}
+
+.console-admin .ui-button--danger {
+  color: white;
+  background: var(--ui-danger);
+}
+
+.console-admin .ui-button--danger:hover:not(:disabled) {
+  background: var(--ui-danger-hover);
+}
+
+.console-admin .ui-button--dangerOutline {
+  color: var(--ui-danger);
+  border-color: var(--ui-danger-border);
+  background: var(--ui-surface);
+}
+
+.console-admin .ui-button--dangerOutline:hover:not(:disabled) {
+  background: var(--ui-danger-surface);
+}
+
+.console-admin .ui-button--warning {
+  color: var(--ui-warning);
+  border-color: var(--ui-warning-border);
+  background: var(--ui-warning-surface);
+}
+
+.console-admin .ui-button--warning:hover:not(:disabled) {
+  background: #fef3c7;
+}
+
+.console-admin :is(.ui-input, .ui-select, .ui-textarea) {
+  min-width: 0;
+  max-width: 100%;
+  border-color: var(--ui-border-control);
+  border-radius: var(--ui-radius);
+  background-color: var(--ui-surface);
+  color: var(--ui-text);
+  font-size: var(--ui-font-size);
+  line-height: 1.25rem;
+}
+
+.console-admin :is(.ui-input, .ui-select) {
+  height: var(--ui-control-height);
+  padding-block: 0.375rem;
+}
+
+.console-admin .ui-textarea {
+  min-height: 5rem;
+  resize: vertical;
+}
+
+.console-admin :is(.ui-input, .ui-textarea)::placeholder {
+  color: var(--ui-text-muted);
+  opacity: 1;
+}
+
+.console-admin :is(.ui-input, .ui-select, .ui-textarea):hover:not(:disabled) {
+  border-color: var(--ui-border-control-hover);
+}
+
+.console-admin :is(.ui-input, .ui-select, .ui-textarea):focus {
+  border-color: var(--ui-focus);
+  box-shadow: none;
+}
+
+.console-admin :is(.ui-input, .ui-select, .ui-textarea)[aria-invalid="true"] {
+  border-color: var(--ui-danger-border);
+}
+
+.console-admin :is(.ui-button, .ui-input, .ui-select, .ui-textarea, .ui-filter-chip):disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.console-admin :is(.ui-input, .ui-select, .ui-textarea):disabled {
+  background: var(--ui-surface-muted);
+}
+
+.console-admin .ui-checkbox {
+  appearance: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex-shrink: 0;
+  margin: 0;
+  border: 4px solid transparent;
+  border-radius: 7px;
+  background-color: var(--ui-surface);
+  background-clip: padding-box;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 12px;
+  box-shadow: inset 0 0 0 1px var(--ui-border-control);
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.console-admin .ui-checkbox:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 1px var(--ui-border-control-hover);
+}
+
+.console-admin .ui-checkbox:checked,
+.console-admin .ui-checkbox:indeterminate {
+  background-color: var(--ui-primary);
+  box-shadow: none;
+}
+
+.console-admin .ui-checkbox:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m2 6 2.5 2.5L10 3' fill='none' stroke='white' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+.console-admin .ui-checkbox:indeterminate {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2 6h8' stroke='white' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+.console-admin .ui-checkbox:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.console-admin .ui-card {
+  min-width: 0;
+  border-color: var(--ui-border);
+  border-radius: var(--ui-radius-panel);
+  background: var(--ui-surface);
+  box-shadow: none;
+}
+
+.console-admin .ui-card-title {
+  color: var(--ui-text);
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+
+.console-admin :is(.ui-card-description, .ui-dialog-description) {
+  color: var(--ui-text-secondary);
+}
+
+.console-admin .ui-badge {
+  width: fit-content;
+  max-width: 100%;
+  align-self: start;
+  justify-self: start;
+  font-size: var(--ui-font-size-small);
+  line-height: 1rem;
+  vertical-align: middle;
+}
+
+.console-admin .ui-dropdown-panel {
+  width: max-content;
+  min-width: min(12rem, calc(100vw - 1rem));
+  max-width: min(24rem, calc(100vw - 1rem));
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-color: var(--ui-border);
+  border-radius: var(--ui-radius-panel);
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  font-size: var(--ui-font-size);
+  overflow-wrap: anywhere;
+  box-shadow: var(--ui-shadow-popover);
+}
+
+.console-admin .ui-dropdown-panel > .ui-button {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+.console-admin .ui-dialog-overlay {
+  background: rgb(15 23 42 / 40%);
+}
+
+.console-admin .ui-dialog {
+  min-width: 0;
+  max-height: calc(100dvh - 2rem);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-panel);
+  background: var(--ui-surface);
+  box-shadow: var(--ui-shadow-dialog);
+}
+
+.console-admin .ui-dialog-title {
+  color: var(--ui-text);
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+
+.console-admin .ui-tooltip-content {
+  border-radius: var(--ui-radius);
+  background: var(--ui-primary);
+  box-shadow: var(--ui-shadow-popover);
+}
+
+.console-admin .ui-filter-chip {
+  display: inline-flex;
+  min-height: var(--ui-control-height-small);
+  align-items: center;
+  gap: var(--ui-space-1);
+  padding: var(--ui-space-1) var(--ui-space-2);
+  border: 1px solid var(--ui-border-control);
+  border-radius: var(--ui-radius);
+  color: var(--ui-text-secondary);
+  background: var(--ui-surface);
+  font-size: var(--ui-font-size-small);
+  line-height: 1.25rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.console-admin .ui-filter-chip:hover {
+  background: var(--ui-surface-hover);
+}
+
+.console-admin .ui-filter-chip[aria-pressed="true"],
+.console-admin .ui-filter-chip[aria-current="true"] {
+  color: var(--ui-link);
+  border-color: var(--ui-focus);
+  background: var(--ui-surface-selected);
+}
+
+.console-admin :is(.ui-button, .ui-action-card, .ui-input, .ui-select, .ui-textarea, .ui-checkbox, .ui-filter-chip):focus-visible {
+  outline: 2px solid var(--ui-focus);
+  outline-offset: 2px;
+}
+
+.console-admin .ui-button:focus-visible {
+  box-shadow: none;
+}
+
+@layer components {
+  .console-admin .ui-table {
+    /* Keep hidden accessibility text inside the caller's scroll container. */
+    position: relative;
+    border-collapse: collapse;
+    background: var(--ui-surface);
+    color: var(--ui-text);
+    font-size: var(--ui-font-size);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .console-admin .ui-table-head {
+    padding: 0.625rem var(--ui-space-3);
+    border-bottom: 1px solid var(--ui-border);
+    background: var(--ui-surface-muted);
+    color: var(--ui-text-secondary);
+    font-size: var(--ui-font-size-small);
+    font-weight: 600;
+    line-height: 1.25rem;
+    vertical-align: middle;
+  }
+
+  .console-admin .ui-table-cell {
+    padding: var(--ui-space-3);
+    border-bottom: 1px solid var(--ui-border);
+    line-height: 1.5rem;
+    vertical-align: middle;
+  }
+
+  .console-admin .ui-table > tbody > tr:last-child > .ui-table-cell {
+    border-bottom: 0;
+  }
+
+  .console-admin .ui-table > tbody > tr:hover {
+    background: var(--ui-surface-hover);
+  }
+
+  .console-admin .ui-table > tbody > tr:is([aria-selected="true"], [data-selected="true"]) {
+    background: var(--ui-surface-selected);
+  }
+
+  .console-admin .ui-table[data-density="compact"] .ui-table-head,
+  .console-admin .ui-table[data-density="compact"] .ui-table-cell {
+    padding-block: var(--ui-space-2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .console-admin :is(.ui-button, .ui-input, .ui-select, .ui-card, .ui-tooltip-content) {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .console-admin .ui-checkbox {
+    appearance: auto;
+    border: 0;
+    background: none;
+    box-shadow: none;
+  }
+}

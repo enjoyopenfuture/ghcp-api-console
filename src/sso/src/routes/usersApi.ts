@@ -1,6 +1,7 @@
 import { Router } from 'express';
-import { apiError, errorFields, loggerFor } from '@ghcp/shared';
-import { getUser, listUsers, SsoUserLimitReachedError, toDto } from '../db/usersRepo.js';
+import { apiError, csvExport, errorFields, loggerFor, readManagementQuery, withSqliteReadSnapshot } from '@ghcp/shared';
+import { getDb } from '../db/connection.js';
+import { getUser, listUsers, summarizeUsers, SsoUserLimitReachedError, toDto } from '../db/usersRepo.js';
 import type { ScimEnterpriseRole } from '../scim/scimClient.js';
 import type { ImportEmuUserStatus, SsoUserBatchOperation } from '@ghcp/shared';
 import {
@@ -41,15 +42,20 @@ usersApiRouter.post('/users/ensure', (req, res) => {
 
 usersApiRouter.get('/users', (req, res) => {
   res.json(
-    listUsers({
-      q: stringQuery(req.query.q),
-      page: numberQuery(req.query.page),
-      pageSize: numberQuery(req.query.pageSize),
-      sort: stringQuery(req.query.sort) as never,
-      dir: stringQuery(req.query.dir) as never,
-    }),
+    listUsers(readManagementQuery(req.query)),
   );
 });
+
+usersApiRouter.get('/users/summary', (_req, res) => res.json(summarizeUsers()));
+usersApiRouter.route('/users/export').get(exportUsers()).post(exportUsers());
+function exportUsers() {
+  return csvExport('sso-users',
+    ['ssoUser', 'email', 'role', 'ghLogin', 'emuStatus', 'copilotSeatStatus', 'updatedAt'],
+    async (query) => listUsers(query),
+    (user) => [user.ssoUser, user.email, user.role, user.ghLogin, user.emuStatus, user.copilotSeatStatus, user.updatedAt],
+    (_query, consume) => withSqliteReadSnapshot(getDb(), (database) => consume(async (query) => listUsers(query, database))),
+  );
+}
 
 usersApiRouter.get('/users/capacity', (_req, res) => {
   res.json(getSsoUserCapacity());

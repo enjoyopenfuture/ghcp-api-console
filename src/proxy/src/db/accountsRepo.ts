@@ -64,9 +64,9 @@ export async function markCopilotOauthStatus(identity: string, status: CopilotOa
   await getStorage().markCopilotOauthStatus(identity, status);
 }
 
-export async function beginCopilotOauthAuthorization(identity: string, oauthAttemptId: string): Promise<boolean> {
+export async function beginCopilotOauthAuthorization(identity: string, oauthAttemptId: string, expectedAttemptId?: string | null): Promise<boolean> {
   await initializeStorage();
-  return getStorage().beginCopilotOauthAuthorization(identity, oauthAttemptId);
+  return getStorage().beginCopilotOauthAuthorization(identity, oauthAttemptId, expectedAttemptId);
 }
 
 export async function failCopilotOauthAuthorization(identity: string, oauthAttemptId: string): Promise<boolean> {

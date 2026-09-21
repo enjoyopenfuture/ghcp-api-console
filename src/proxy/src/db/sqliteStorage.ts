@@ -10,8 +10,12 @@ import {
   type DeleteProxyAccountResult,
   type PageResponse,
   type ProxyRequestStatDto,
+  type ManagementQuery,
+  type ManagementSummary,
+  withSqliteReadSnapshot,
 } from '@ghcp/shared';
 import { runMigrations } from './migrations.js';
+import { managementSql } from './managementQueries.js';
 import type {
   AccountListQuery,
   CreateAccountInput,
@@ -53,10 +57,17 @@ interface StatRow {
 export class SqliteStorage implements ProxyStorage {
   private db?: Database.Database;
 
+  withReadSnapshot<T>(read: (reader: Pick<ProxyStorage, 'listAccounts' | 'listRequestStatsPage'>) => Promise<T>): Promise<T> {
+    return withSqliteReadSnapshot(this.database(), (database) => read({
+      listAccounts: (query) => this.listAccounts(query, database),
+      listRequestStatsPage: (query) => this.listRequestStatsPage(query, database),
+    }));
+  }
+
   constructor(
     private readonly path: string,
     private readonly requestStatsPerAccountLimit: number,
-  ) {}
+  ) { }
 
   async initialize(): Promise<void> {
     if (this.db) return;
@@ -77,21 +88,24 @@ export class SqliteStorage implements ProxyStorage {
     this.db = undefined;
   }
 
-  async listAccounts(query: AccountListQuery = {}): Promise<PageResponse<ProxyAccountRecord>> {
-    const page = Math.max(1, Math.trunc(query.page ?? 1));
+  async listAccounts(query: AccountListQuery = {}, database = this.database()): Promise<PageResponse<ProxyAccountRecord>> {
+    let page = Math.max(1, Math.trunc(query.page ?? 1));
     const pageSize = Math.max(1, Math.min(Math.trunc(query.pageSize ?? 25), 100));
-    const q = query.q?.trim();
-    const where = q ? 'WHERE identity LIKE ? OR sso_user LIKE ? OR gh_login LIKE ?' : '';
-    const args = q ? [`%${q}%`, `%${q}%`, `%${q}%`] : [];
-    const sort = sortColumn(query.sort);
-    const dir = query.dir === 'asc' ? 'ASC' : 'DESC';
-    const total = (this.database()
+    const { where, args, order } = managementSql('accounts', query);
+    const total = (database
       .prepare(`SELECT COUNT(*) AS count FROM proxy_accounts ${where}`)
       .get(...args) as { count: number }).count;
-    const rows = this.database()
-      .prepare(`SELECT * FROM proxy_accounts ${where} ORDER BY ${sort} ${dir} LIMIT ? OFFSET ?`)
+    page = Math.min(page, Math.max(1, Math.ceil(total / pageSize)));
+    const rows = database
+      .prepare(`SELECT * FROM proxy_accounts ${where} ORDER BY ${order} LIMIT ? OFFSET ?`)
       .all(...args, pageSize, (page - 1) * pageSize) as AccountRow[];
     return pageResponse(rows.map(mapAccountRow), total, page, pageSize);
+  }
+
+  async summarizeAccounts(): Promise<ManagementSummary> {
+    const rows = this.database().prepare('SELECT copilot_oauth_status AS status, COUNT(*) AS count FROM proxy_accounts GROUP BY copilot_oauth_status')
+      .all() as Array<{ status: string; count: number }>;
+    return { total: rows.reduce((total, row) => total + row.count, 0), counts: Object.fromEntries(rows.map((row) => [row.status, row.count])), updatedAt: nowIso() };
   }
 
   async getAccount(identity: string): Promise<ProxyAccountRecord | undefined> {
@@ -197,13 +211,15 @@ export class SqliteStorage implements ProxyStorage {
     ghLogin?: string,
   ): Promise<ProxyAccountRecord | undefined> {
     const now = nowIso();
+    // The status guard makes "cancel wins": once Login marked the attempt failed, a token that
+    // arrives late for the same attempt is refused instead of silently reviving it.
     const result = this.database()
       .prepare(`
         UPDATE proxy_accounts
         SET copilot_oauth_token = ?, gh_login = COALESCE(?, gh_login),
             copilot_oauth_status = 'valid', copilot_oauth_updated_at = ?,
             copilot_oauth_attempt_id = NULL, updated_at = ?
-        WHERE identity = ? AND copilot_oauth_attempt_id = ?
+        WHERE identity = ? AND copilot_oauth_attempt_id = ? AND copilot_oauth_status = 'refreshing'
       `)
       .run(copilotOauthToken, ghLogin, now, now, identity, oauthAttemptId);
     return result.changes > 0 ? this.getAccount(identity) : undefined;
@@ -215,14 +231,16 @@ export class SqliteStorage implements ProxyStorage {
       .run(status, nowIso(), identity);
   }
 
-  async beginCopilotOauthAuthorization(identity: string, oauthAttemptId: string): Promise<boolean> {
+  async beginCopilotOauthAuthorization(identity: string, oauthAttemptId: string, expectedAttemptId?: string | null): Promise<boolean> {
+    const guard = expectedAttemptId === undefined ? '' : ' AND copilot_oauth_attempt_id IS ?';
+    const args = expectedAttemptId === undefined ? [] : [expectedAttemptId];
     return this.database()
       .prepare(`
         UPDATE proxy_accounts
         SET copilot_oauth_status = 'refreshing', copilot_oauth_attempt_id = ?, updated_at = ?
-        WHERE identity = ?
+        WHERE identity = ? ${guard}
       `)
-      .run(oauthAttemptId, nowIso(), identity).changes > 0;
+      .run(oauthAttemptId, nowIso(), identity, ...args).changes > 0;
   }
 
   async failCopilotOauthAuthorization(identity: string, oauthAttemptId: string): Promise<boolean> {
@@ -304,12 +322,22 @@ export class SqliteStorage implements ProxyStorage {
     const boundedLimit = Math.max(1, Math.min(limit, 1000));
     const rows = identity
       ? this.database()
-          .prepare('SELECT * FROM proxy_request_stats WHERE identity = ? ORDER BY requested_at DESC, id DESC LIMIT ?')
-          .all(identity, boundedLimit)
+        .prepare('SELECT * FROM proxy_request_stats WHERE identity = ? ORDER BY requested_at DESC, id DESC LIMIT ?')
+        .all(identity, boundedLimit)
       : this.database()
-          .prepare('SELECT * FROM proxy_request_stats ORDER BY requested_at DESC, id DESC LIMIT ?')
-          .all(boundedLimit);
+        .prepare('SELECT * FROM proxy_request_stats ORDER BY requested_at DESC, id DESC LIMIT ?')
+        .all(boundedLimit);
     return (rows as StatRow[]).map(mapStatRow);
+  }
+
+  async listRequestStatsPage(query: ManagementQuery = {}, database = this.database()): Promise<PageResponse<ProxyRequestStatDto>> {
+    const { where, args, order } = managementSql('requests', query);
+    const total = (database.prepare(`SELECT COUNT(*) AS count FROM proxy_request_stats ${where}`).get(...args) as { count: number }).count;
+    const pageSize = Math.max(1, Math.min(query.pageSize ?? 25, 100));
+    const page = Math.min(Math.max(1, query.page ?? 1), Math.max(1, Math.ceil(total / pageSize)));
+    const rows = database.prepare(`SELECT * FROM proxy_request_stats ${where} ORDER BY ${order} LIMIT ? OFFSET ?`)
+      .all(...args, pageSize, (page - 1) * pageSize) as StatRow[];
+    return pageResponse(rows.map(mapStatRow), total, page, pageSize);
   }
 
   async pruneAllRequestStats(): Promise<void> {
@@ -384,21 +412,4 @@ function mapStatRow(row: StatRow): ProxyRequestStatDto {
     cacheInputTokens: row.cache_input_tokens,
     cacheWriteTokens: row.cache_write_tokens,
   };
-}
-
-function sortColumn(sort: AccountListQuery['sort']): string {
-  switch (sort) {
-    case 'identity':
-      return 'identity';
-    case 'ssoUser':
-      return 'sso_user';
-    case 'ghLogin':
-      return 'gh_login';
-    case 'copilotOauthStatus':
-      return 'copilot_oauth_status';
-    case 'createdAt':
-      return 'created_at';
-    default:
-      return 'updated_at';
-  }
 }

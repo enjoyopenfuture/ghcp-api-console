@@ -8,5 +8,5 @@ export interface AccountCredentials {
 
 export interface AuthStrategy {
   readonly name: string;
-  authorize(device: DeviceCodeResponse): Promise<void>;
+  authorize(device: DeviceCodeResponse, signal?: AbortSignal): Promise<void>;
 }

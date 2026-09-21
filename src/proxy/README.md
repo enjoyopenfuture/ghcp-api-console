@@ -238,7 +238,7 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 | `POST` | `/api/accounts/copilot-oauth-token/import` | `{ csvText: string }`；CSV 头必须是 `name,copilotOauthToken`，name 不可重复 | `BatchResult<ImportCopilotOauthTokenRow>`；每个 token 通过 `/models` 验证后才写入。 |
 | `GET` | `/api/accounts/:identity/request-stats?limit=` | `limit` 默认 100，最大 1000 | `ProxyRequestStatDto[]`。 |
 | `GET` | `/api/request-stats?limit=` | 同上 | 跨账号最近请求统计。 |
-| `POST` | `/api/accounts/:identity/copilot-oauth/reauthorize` | `{ ssoPassword: string, ssoType?: "azure" | "custom" }`；`ssoPassword` 必填 | 标记 OAuth `refreshing` 并创建 Login 任务，返回 `ProxyAccountDto`。 |
+| `POST` | `/api/accounts/:identity/copilot-oauth/reauthorize` | `{ credentialMode: "default", ssoType? }` 或 `{ credentialMode: "override", ssoPassword, ssoType? }`；兼容旧的非空密码请求 | 标记 OAuth `refreshing` 并创建 Login 任务，返回 `ProxyAccountDto`；提交后账号被删除则明确返回冲突。 |
 | `GET` | `/api/error-diagnostics?page=&pageSize=` | 分页参数可选，`pageSize` 最大 100 | `ProxyErrorDiagnosticsListResponse`，只返回摘要并指明功能是否开启、是否脱敏。 |
 | `GET` | `/api/error-diagnostics/:id` | 诊断 UUID | `ProxyErrorDiagnosticDetailDto`，包含摘要字段和完整人类可读日志；不存在返回 404，功能关闭返回 503。 |
 | `GET` | `/api/error-diagnostics/:id/download` | 诊断 UUID | 以 `Content-Disposition: attachment` 下载 `.log` 文本。 |
@@ -274,7 +274,7 @@ MYSQL_AUTO_MIGRATE=false
 
 缺少任一业务表或无读取权限时，Proxy 会在监听 HTTP 端口之前报错，提示管理员处理，不自动修复。检查不核对字段、类型、索引或写权限；管理员需要保证实际表结构与当前应用版本匹配，可按当前版本建表，也可使用 `src/db/mysqlMigrations.ts` 中的 `runMysqlMigrations` 完成初始化或升级。
 
-运行账号仍需对三张业务表具备 `SELECT`、`INSERT`、`UPDATE`、`DELETE` 权限；启动时仍会清理请求统计，因此该开关不是只读模式。表检查在存储初始化时完成并缓存，之后 `/readyz` 继续检查连接，不持续检查表结构。配置修改后需要重启 Proxy；未设置或为 `true` 时保持自动迁移，SQLite 不受此开关影响。
+运行账号仍需对三张业务表具备 `SELECT`、`INSERT`、`UPDATE`、`DELETE` 权限；启动时仍会清理请求统计，因此该开关不是只读模式。表检查在存储初始化时完成并缓存，之后 `/readyz` 继续检查连接，不持续检查表结构。配置修改后需要重启 Proxy；未设置或为 `true` 时保持自动迁移，SQLite 不受此开关影响。手工部署使用当前 `scripts/proxy-mysql-initial.sql`。
 
 #### `proxy_accounts`
 
@@ -306,6 +306,14 @@ MYSQL_AUTO_MIGRATE=false
 索引：`idx_proxy_request_stats_identity_time(identity, requested_at DESC)`。每次写入后会按 `REQUEST_STATS_PER_ACCOUNT_LIMIT` 清理该账号旧记录；服务启动时也会清理一次。
 
 `proxy_identity_initializations` 保存带过期时间和唯一 claim ID 的初始化租约。未知 identity 在调用 SSO、SCIM/seat 和 Login 之前必须先取得租约，因此多个 Proxy Pod 不会重复执行外部副作用；旧 Pod 也不能释放新 Pod 的 claim。
+
+授权栅栏只有 `proxy_accounts.copilot_oauth_attempt_id` 一列，不再有单独的回执表：`begin` 把账号切到新 attempt（Login 重试必须带 `previousAttemptId`，与账号当前 attempt 不一致时返回 `409 authorization_conflict`；Console 的手动/批量重新授权则强制切换，作为账号卡在 `refreshing` 时的恢复入口）；token 写回和失败上报都只在账号仍指向该 attempt 时生效，写回还要求状态仍为 `refreshing`，因此"先取消/失败则拒绝迟到写回，先写回则保持成功"。创建 Login 任务的响应丢失时按 attempt 到 Login 核对；核对不了就把该 attempt 标为失败并返回 `502 login_submission_unconfirmed`，已写回的 token 因 attempt 已清空而不受影响。这些都是单条 UPDATE，不需要事务；删除账号仍在事务中进行，事务遇到 `ER_LOCK_DEADLOCK` / `ER_LOCK_WAIT_TIMEOUT` 会回滚并最多重试 2 次。账号批量操作（`/api/accounts/operations`）的预览与结果只保存在 Proxy 进程内存中，多实例部署下预览与确认需要落到同一实例，否则确认会返回 `404 operation_not_found` 并提示重新预览。
+
+管理查询补充 `GET /api/accounts/summary`、完整分页 `GET /api/request-stats?page=&pageSize=&identity=&model=&success=&from=&to=`，旧的仅 `limit` 请求仍返回数组。账号支持 OAuth 状态和更新时间筛选；`q`/`model` 中的 `%`、`_` 按字面匹配。Request Stats 的范围始终受 retention 限制。账号 `/api/accounts/operations` 使用 preview / execute / history / export 处理删除与重新授权，复用单项业务及缓存失效；其错误同样经过 `managementErrorHandler`，与其他管理路由返回一致的错误结构。`reauthorize` 必须显式传 `ssoType`（`custom` 或 `azure`），缺省返回 `400 sso_type_required`。Console 的单账号和批量重新授权对话框默认选择 Custom 并显式传入 `custom`；Proxy 不保存账号所属 SSO 提供方，Azure 账号仍需切换为 Azure 并提供覆盖密码，API 不推断提供方。
+
+Accounts、Request Stats、Error Diagnostics 均有 `GET/POST <资源>/export`：全部匹配、`scope=page` 或 POST 已选范围。SQLite 使用独立只读快照连接，MySQL 使用独立 repeatable-read 事务；按页流式输出，下载断开会释放读取资源。诊断导出仅含摘要，在本地/共享模式下先捕获保留摘要，再一致筛选分页，保留共享 clear cutoff 语义。长下载会延长数据库读快照寿命，应避免同时发起大量全量导出。
+
+服务间新增 `POST /internal/accounts/:identity/oauth-attempts/:attemptId/prepare`。prepare 校验映射、活动授权及密码模式；默认密码经 SSO 内部只读入口解析，Console 公共 API 无法调用该入口。
 
 SQLite 是默认的单 Pod 模式，不能把同一个 SQLite 文件以 RWX 方式提供给多个 Proxy Pod。MySQL 模式不包含 identity/token 缓存，每个请求直接按主键读取共享数据库。已有 SQLite 数据切换到 MySQL 使用仓库根目录 `upgrade/sqlite-to-mysql` 的显式工具。
 
@@ -361,13 +369,15 @@ src/proxy/
     │   ├── copilotAuth.ts       # Copilot OAuth auth context
     │   ├── copilotAuthManager.ts # 账号初始化、OAuth 状态与重新授权
     │   └── copilotClient.ts     # Copilot 模型列表、路径校验、转发 headers
-    ├── clients/                 # SSO/Login 服务 JSON client
+    ├── clients/                 # SSO/Login 服务 JSON client，响应丢失时按 attempt 到 Login 核对任务是否已接受
     ├── accounts/                # Copilot OAuth token 验证与 CSV 导入
     ├── diagnostics/             # 错误现场构造、人类可读格式、轮转文本 store 与测试
     └── db/                      # SQLite/MySQL provider、迁移、accounts/stats repo
 ```
 
 `src/packages/shared/src/contracts.ts` 和 `api.ts` 定义 Proxy 与其他服务共享的 DTO、分页、批处理和错误结构。
+
+SQLite/MySQL 的管理列表筛选和稳定排序共用 `src/db/managementQueries.ts` 的 `managementSql()`，存储实现不再各自维护排序字段映射。Login 提交响应不确定时，客户端仍通过 `getLoginTaskByAttempt()` 核对是否已接受任务；移除未使用的按任务 ID 查询包装不影响服务端查询接口。
 
 ## 8. 开发提示
 

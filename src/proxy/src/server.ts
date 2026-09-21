@@ -1,6 +1,6 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { Server } from 'node:http';
-import { shouldRedact } from '@ghcp/shared';
+import { shouldRedact, managementErrorHandler } from '@ghcp/shared';
 import { config } from './config.js';
 import { closeStorage, initializeStorage, pingStorage } from './db/connection.js';
 import { pruneAllRequestStats } from './db/requestStatsRepo.js';
@@ -12,6 +12,7 @@ import { compatibleRouter } from './routes/compatible.js';
 import { resolveClaudeCodeOptimized } from './routes/claudeCodeMode.js';
 import { adminApiRouter } from './routes/adminApi.js';
 import { internalApiRouter } from './routes/internalApi.js';
+import { accountOperationsRouter } from './routes/operationsApi.js';
 
 const requestLogger = new Logger('request');
 
@@ -34,8 +35,9 @@ export function buildApp(): express.Express {
       res.status(503).json({ status: 'unavailable', service: 'proxy' });
     }
   });
-  app.use('/api', requireInternalToken, adminApiRouter);
-  app.use('/internal', requireInternalToken, internalApiRouter);
+  app.use('/api/accounts/operations', requireInternalToken, accountOperationsRouter, managementErrorHandler('proxy'));
+  app.use('/api', requireInternalToken, adminApiRouter, managementErrorHandler('proxy'));
+  app.use('/internal', requireInternalToken, internalApiRouter, managementErrorHandler('proxy'));
   app.use(requireApiKey, requireIdentityHeader, compatibleRouter);
   app.use((req, res) => {
     const claudeCodeOptimized = resolveClaudeCodeOptimized(req);
