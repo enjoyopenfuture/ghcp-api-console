@@ -310,17 +310,18 @@ Claude Code 可以通过 settings 文件接入本地 proxy，例如 `~/.claude/s
 
 ```json
 {
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "env": {
+    "ANTHROPIC_MODEL": "claude-opus-5[1m]",
     "ANTHROPIC_BASE_URL": "http://localhost:3000",
-    "ANTHROPIC_AUTH_TOKEN": "<API_KEY>",
-    "ANTHROPIC_CUSTOM_HEADERS": "X-User-Identity: alice",
-    "ANTHROPIC_MODEL": "<claude-model-from-v1-models>",
-    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
-  }
+    "ANTHROPIC_AUTH_TOKEN": "<your_proxy_api_key>",
+    "ANTHROPIC_CUSTOM_HEADERS": "X-User-Identity: <your_identity_string>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-4.5"
+  },
+  "theme": "dark",
+  "model": "claude-opus-5"
 }
 ```
+**注意：** Copilot API的Claude系列模型默认是包含1M的上下文窗口的。但在Claude Code侧默认是使用200K上下文窗口，这个是CC在客户端默认的配置。如果需要更多的上下文窗口，需要在CC配置文件的模型名称后面增加`[1m]`的后缀，如上面的示例中的模型名称。
 
 如果使用项目内 `.claude/settings.local.json`，不要提交包含 `ANTHROPIC_AUTH_TOKEN` 的文件。
 
