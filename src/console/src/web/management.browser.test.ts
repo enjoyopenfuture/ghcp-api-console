@@ -7,6 +7,8 @@ import { chromium } from 'playwright';
 import type { LoginTaskDto, ManagementOperation, ManagementSelection } from '@ghcp/shared';
 import { assertNoAutomaticReads, createConsoleFixture, paths, settle } from './test-support/console-fixture.js';
 
+const customPasswordLabel = 'Use a custom password instead of the default password';
+
 test('admin lists support adjustable pages, cross-page retry overrides and restored navigation', { timeout: 90_000 }, async (t) => {
   const tasks: LoginTaskDto[] = Array.from({ length: 73 }, (_, index) => ({
     id: `task-${String(index).padStart(3, '0')}`, identity: `identity-${index}`, ssoUser: `user-${index}`,
@@ -129,13 +131,23 @@ test('admin lists support adjustable pages, cross-page retry overrides and resto
   await page.getByRole('button', { name: 'Retry failed tasks', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Confirm: retry', exact: true });
   await dialog.waitFor();
-  await dialog.getByRole('checkbox', { name: 'Using default password', exact: true }).first().check();
+  await dialog.getByRole('checkbox', { name: `identity-0 ${customPasswordLabel}`, exact: true }).check();
   await dialog.getByLabel('Password override for task-000', { exact: true }).fill('browser-fixture-override');
+  await dialog.getByRole('button', { name: 'Next', exact: true }).click();
+  const nextOverride = dialog.getByRole('checkbox', { name: `identity-25 ${customPasswordLabel}`, exact: true });
+  assert.equal(await nextOverride.isChecked(), false);
+  await nextOverride.check();
+  await dialog.getByLabel('Password override for task-025', { exact: true }).fill('browser-fixture-second-override');
+  await dialog.getByRole('button', { name: 'Previous', exact: true }).click();
+  assert.equal(await dialog.getByLabel('Password override for task-000', { exact: true }).inputValue(), 'browser-fixture-override');
   await dialog.getByRole('button', { name: 'Confirm 26 item(s)', exact: true }).click();
   await dialog.waitFor({ state: 'hidden' });
   assert.equal(await page.getByRole('region', { name: /^Operation:/ }).count(), 0);
   assert.equal(await page.getByRole('dialog').count(), 0, 'Submission does not open a results dialog');
-  assert.deepEqual(submitted?.overrides, [{ id: 'task-000', password: 'browser-fixture-override' }]);
+  assert.deepEqual(submitted?.overrides, [
+    { id: 'task-000', password: 'browser-fixture-override' },
+    { id: 'task-025', password: 'browser-fixture-second-override' },
+  ]);
   await page.getByRole('group', { name: 'Selection actions', exact: true }).getByText('0 record(s) selected', { exact: true }).waitFor();
   await page.getByRole('textbox', { name: 'Search', exact: true }).waitFor();
   assert.equal(await page.getByRole('checkbox', { name: 'Select current page', exact: true }).isChecked(), false);
@@ -488,12 +500,15 @@ test('single and bulk Proxy reauthorization default to Custom and submit without
   assert.equal(columns.includes('Last action'), false);
   const account = page.getByRole('row').filter({ has: page.getByRole('checkbox', { name: 'Select identity-0', exact: true }) });
   await account.getByRole('button', { name: 'Reauthorize', exact: true }).click();
-  const single = page.getByRole('dialog', { name: 'Reauthorize Copilot OAuth for identity-0', exact: true });
+  const single = page.getByRole('dialog', { name: 'Reauthorize Copilot OAuth', exact: true });
   const singleProvider = single.getByRole('combobox', { name: 'SSO type', exact: true });
+  const singleOverride = single.getByRole('checkbox', { name: `identity-0 ${customPasswordLabel}`, exact: true });
   assert.equal(await singleProvider.inputValue(), 'custom');
-  assert.equal(await single.getByRole('checkbox', { name: 'Using default password', exact: true }).isChecked(), true);
+  assert.equal(await singleOverride.isChecked(), false);
   await singleProvider.selectOption('azure');
-  assert.equal(await single.getByRole('checkbox').isDisabled(), true);
+  assert.equal(await singleOverride.isChecked(), true);
+  assert.equal(await singleOverride.isDisabled(), true);
+  await single.getByText(/Azure requires a custom password for this account\./).waitFor();
   await single.getByRole('button', { name: 'Create reauthorization task', exact: true }).click();
   await single.getByText('Provide a password override for this account. Azure cannot use the local default password.', { exact: true }).waitFor();
   const singlePath = `${paths.accounts}/identity-0/copilot-oauth/reauthorize`;
@@ -501,7 +516,7 @@ test('single and bulk Proxy reauthorization default to Custom and submit without
   await single.getByRole('button', { name: 'Cancel', exact: true }).click();
   await account.getByRole('button', { name: 'Reauthorize', exact: true }).click();
   assert.equal(await singleProvider.inputValue(), 'custom', 'Reopening resets the provider to Custom');
-  assert.equal(await single.getByRole('checkbox', { name: 'Using default password', exact: true }).isChecked(), true);
+  assert.equal(await singleOverride.isChecked(), false);
   assert.equal(await single.locator('input[type="password"]').count(), 0);
   await single.getByRole('button', { name: 'Create reauthorization task', exact: true }).click();
   await single.waitFor({ state: 'hidden' });
@@ -515,9 +530,12 @@ test('single and bulk Proxy reauthorization default to Custom and submit without
   const bulkProvider = bulk.getByRole('combobox', { name: 'SSO provider', exact: true });
   const confirm = bulk.getByRole('button', { name: 'Confirm 2 item(s)', exact: true });
   assert.equal(await bulkProvider.inputValue(), 'custom');
+  assert.deepEqual(await bulk.getByRole('checkbox').evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).checked)), [false, false]);
+  assert.equal(await bulk.locator('input[type="password"]').count(), 0);
   assert.equal(await confirm.isEnabled(), true);
   await bulkProvider.selectOption('azure');
   assert.equal(await confirm.isDisabled(), true);
+  assert.equal(await bulk.getByText('Azure requires a custom password for this account.', { exact: true }).count(), 2);
   await bulk.getByRole('button', { name: 'Close', exact: true }).click();
   await page.getByRole('button', { name: 'Reauthorize selected', exact: true }).click();
   assert.equal(await bulkProvider.inputValue(), 'custom', 'A fresh batch does not retain the previous Azure selection');
@@ -551,7 +569,8 @@ test('credential confirmations still require Azure overrides and preserve passwo
   const retryConfirm = retry.getByRole('button', { name: 'Confirm 1 item(s)', exact: true });
   await retryConfirm.waitFor();
   assert.equal(await retryConfirm.isDisabled(), true);
-  await retry.getByRole('checkbox', { name: 'Password override required (Azure)', exact: true }).check();
+  await retry.getByText('Azure requires a custom password for this account.', { exact: true }).waitFor();
+  await retry.getByRole('checkbox', { name: `identity-1 / user-1 ${customPasswordLabel}`, exact: true }).check();
   await retry.getByLabel('Password override for task-failed', { exact: true }).fill('fixture-azure-password');
   const executePath = `${paths.operations}/fixture-operation/execute`;
   fixture.failures.set(executePath, { message: 'Fixture credentials submission unavailable' });
@@ -576,7 +595,7 @@ test('credential confirmations still require Azure overrides and preserve passwo
   assert.equal(await confirm.isEnabled(), true, 'Custom can use the server-resolved default password');
   await reauthorize.getByRole('combobox', { name: 'SSO provider', exact: true }).selectOption('azure');
   assert.equal(await confirm.isDisabled(), true, 'Azure reauthorization requires an override');
-  await reauthorize.getByRole('checkbox', { name: 'Using default password', exact: true }).check();
+  await reauthorize.getByRole('checkbox', { name: `identity-0 ${customPasswordLabel}`, exact: true }).check();
   await reauthorize.getByLabel('Password override for identity-0', { exact: true }).fill('fixture-proxy-password');
   await confirm.click();
   await reauthorize.waitFor({ state: 'hidden' });
@@ -588,6 +607,179 @@ test('credential confirmations still require Azure overrides and preserve passwo
   assert.equal(await page.getByRole('dialog').count(), 0);
   fixture.assertHealthy();
 });
+
+test('credential checkbox keeps single-account wording stable and preserves custom passwords on failure', { timeout: 45_000 }, async (t) => {
+  const fixture = await createConsoleFixture(t);
+  const { page } = fixture;
+  await fixture.goto('accounts');
+  const account = page.getByRole('row').filter({ has: page.getByRole('checkbox', { name: 'Select identity-0', exact: true }) });
+  await account.getByRole('button', { name: 'Reauthorize', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Reauthorize Copilot OAuth', exact: true });
+  const checkbox = dialog.getByRole('checkbox', { name: `identity-0 ${customPasswordLabel}`, exact: true });
+  const password = dialog.getByLabel('SSO password override', { exact: true });
+  const submit = dialog.getByRole('button', { name: 'Create reauthorization task', exact: true });
+  const path = `${paths.accounts}/identity-0/copilot-oauth/reauthorize`;
+  assert.equal(await checkbox.isChecked(), false);
+  assert.equal(await password.count(), 0);
+  await dialog.getByText('identity-0', { exact: true }).click();
+  assert.equal(await checkbox.isChecked(), true, 'The account name labels the custom-password checkbox');
+  await submit.click();
+  await dialog.getByText('Provide a password override for this account. Azure cannot use the local default password.', { exact: true }).waitFor();
+  assert.equal(fixture.count(path, 'POST'), 0);
+  await password.fill('discarded-password');
+  await checkbox.focus();
+  await page.keyboard.press('Space');
+  assert.equal(await checkbox.isChecked(), false);
+  assert.equal(await password.count(), 0);
+  await page.keyboard.press('Space');
+  assert.equal(await checkbox.isChecked(), true);
+  assert.equal(await password.inputValue(), '', 'Toggling clears the previous override');
+  await password.fill('fixture-single-password');
+  fixture.failures.set(path, { message: 'Fixture single reauthorization unavailable' });
+  await submit.click();
+  await dialog.getByText('Fixture single reauthorization unavailable', { exact: true }).waitFor();
+  assert.equal(await password.inputValue(), 'fixture-single-password');
+  fixture.failures.delete(path);
+  await submit.click();
+  await dialog.waitFor({ state: 'hidden' });
+  assert.deepEqual(fixture.requests.filter((request) => request.path === path).map((request) => request.body), [
+    { credentialMode: 'override', ssoPassword: 'fixture-single-password', ssoType: 'custom' },
+    { credentialMode: 'override', ssoPassword: 'fixture-single-password', ssoType: 'custom' },
+  ]);
+  await account.getByRole('button', { name: 'Reauthorize', exact: true }).click();
+  assert.equal(await checkbox.isChecked(), false);
+  assert.equal(await password.count(), 0);
+  const provider = dialog.getByRole('combobox', { name: 'SSO type', exact: true });
+  await provider.selectOption('azure');
+  assert.equal(await checkbox.isChecked(), true);
+  assert.equal(await checkbox.isDisabled(), true);
+  assert.equal(await password.inputValue(), '');
+  await provider.selectOption('custom');
+  assert.equal(await checkbox.isChecked(), true, 'Switching back to Custom preserves the active credential mode');
+  assert.equal(await checkbox.isEnabled(), true);
+  await checkbox.uncheck();
+  assert.equal(await password.count(), 0);
+  await submit.click();
+  await dialog.waitFor({ state: 'hidden' });
+  assert.deepEqual(fixture.requests.filter((request) => request.path === path).at(-1)?.body, { credentialMode: 'default', ssoType: 'custom' });
+  fixture.assertHealthy();
+});
+
+for (const action of ['reauthorize', 'retry'] as const) {
+  test(`credential checkbox preserves per-account Custom overrides for ${action}`, { timeout: 45_000 }, async (t) => {
+    const fixture = await createConsoleFixture(t);
+    const { page } = fixture;
+    const ids = action === 'reauthorize' ? ['identity-0', 'identity-1'] : ['task-failed', 'task-retry'];
+    const labels = action === 'reauthorize' ? ids : ['identity-1 / user-1', 'identity-2 / user-2'];
+    await fixture.goto(action === 'reauthorize' ? 'accounts' : 'tasks');
+    for (const id of ids) await page.getByRole('checkbox', { name: `Select ${id}`, exact: true }).check();
+    await page.getByRole('button', { name: action === 'reauthorize' ? 'Reauthorize selected' : 'Retry failed tasks', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: `Confirm: ${action}`, exact: true });
+    const first = dialog.getByRole('checkbox', { name: `${labels[0]} ${customPasswordLabel}`, exact: true });
+    const second = dialog.getByRole('checkbox', { name: `${labels[1]} ${customPasswordLabel}`, exact: true });
+    const password = dialog.getByLabel(`Password override for ${ids[0]}`, { exact: true });
+    const confirm = dialog.getByRole('button', { name: 'Confirm 2 item(s)', exact: true });
+    assert.equal(await first.isChecked(), false);
+    assert.equal(await second.isChecked(), false);
+    assert.equal(await dialog.locator('input[type="password"]').count(), 0);
+    assert.equal(await confirm.isEnabled(), true);
+    await dialog.getByText(labels[0]!, { exact: true }).click();
+    assert.equal(await first.isChecked(), true);
+    assert.equal(await second.isChecked(), false);
+    assert.equal(await confirm.isDisabled(), true);
+    await password.fill('discarded-password');
+    await first.focus();
+    await page.keyboard.press('Space');
+    assert.equal(await first.isChecked(), false);
+    assert.equal(await password.count(), 0);
+    assert.equal(await confirm.isEnabled(), true);
+    await page.keyboard.press('Space');
+    assert.equal(await first.isChecked(), true);
+    assert.equal(await password.inputValue(), '');
+    assert.equal(await confirm.isDisabled(), true);
+    await password.fill('fixture-custom-password');
+    assert.equal(await second.isChecked(), false);
+    await confirm.click();
+    await dialog.waitFor({ state: 'hidden' });
+    const base = action === 'reauthorize' ? `${paths.accounts}/operations` : paths.operations;
+    assert.deepEqual(fixture.requests.find((request) => request.path === `${base}/fixture-operation/execute`)?.body, {
+      ssoType: 'custom', overrides: [{ id: ids[0], password: 'fixture-custom-password' }],
+    });
+    assert.equal(await page.locator('input[type="password"]').count(), 0);
+    fixture.assertHealthy();
+  });
+}
+
+for (const entry of ['single', 'bulk', 'retry'] as const) {
+  test(`credential checkbox layout wraps account names without overflow for ${entry}`, { timeout: 45_000 }, async (t) => {
+    const fixture = await createConsoleFixture(t);
+    const { page, data } = fixture;
+    for (const identity of ['identity-0', `long-${'account'.repeat(20)}`]) {
+      data.accounts[0]!.identity = identity;
+      data.tasks[1]!.identity = identity;
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await fixture.goto(entry === 'retry' ? 'tasks' : 'accounts');
+      if (identity !== 'identity-0') {
+        await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+        await settle(page);
+      }
+      const id = entry === 'retry' ? 'task-failed' : identity;
+      if (entry === 'single') {
+        await page.getByRole('row').filter({ has: page.getByRole('checkbox', { name: `Select ${id}`, exact: true }) })
+          .getByRole('button', { name: 'Reauthorize', exact: true }).click();
+      } else {
+        await page.getByRole('checkbox', { name: `Select ${id}`, exact: true }).check();
+        await page.getByRole('button', { name: entry === 'retry' ? 'Retry failed tasks' : 'Reauthorize selected', exact: true }).click();
+      }
+      const dialog = page.getByRole('dialog', { name: entry === 'single' ? 'Reauthorize Copilot OAuth' : `Confirm: ${entry === 'retry' ? 'retry' : 'reauthorize'}`, exact: true });
+      const label = entry === 'retry' ? `${identity} / user-1` : identity;
+      const checkbox = dialog.getByRole('checkbox', { name: `${label} ${customPasswordLabel}`, exact: true });
+      await dialog.getByText(/When selected, enter the password for this account\./).waitFor();
+      if (entry === 'retry') await dialog.getByText('task-failed', { exact: true }).waitFor();
+      await checkbox.check();
+      for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        const bounds = await checkbox.evaluate((input) => {
+          const label = input.closest('label')!;
+          const dialog = input.closest('[role="dialog"]')!;
+          const [checkbox, account, wording, panel, ...controls] = [
+            input, input.nextElementSibling!, label.lastElementChild!, dialog, ...dialog.querySelectorAll('input, select, label'),
+          ].map((element) => {
+            const { top, left, bottom, right } = element.getBoundingClientRect();
+            return { top, left, bottom, right };
+          });
+          return {
+            checkbox: checkbox!, account: account!, wording: wording!, dialog: panel!, controls,
+            dialogOverflow: dialog.scrollWidth - dialog.clientWidth,
+            pageOverflow: document.documentElement.scrollWidth - window.innerWidth,
+            help: document.getElementById(input.getAttribute('aria-describedby')!)?.textContent,
+            wordingBackground: getComputedStyle(label.lastElementChild!).backgroundColor,
+            accountBackground: getComputedStyle(input.nextElementSibling!).backgroundColor,
+          };
+        });
+        assert.match(bounds.help ?? '', /When selected, enter the password for this account\./);
+        assert.notEqual(bounds.wordingBackground, 'rgba(0, 0, 0, 0)', 'Credential wording has a visible background');
+        assert.notEqual(bounds.wordingBackground, bounds.accountBackground, 'Credential wording is visually distinct from the account');
+        assert.ok(bounds.checkbox.right <= bounds.account.left, 'The checkbox does not overlap the account name');
+        if (width === 1280 && identity === 'identity-0') {
+          assert.ok(bounds.account.right <= bounds.wording.left, 'Short account and wording share a desktop row');
+          for (const element of [bounds.account, bounds.wording]) {
+            assert.ok(element.top < bounds.checkbox.bottom && element.bottom > bounds.checkbox.top, 'Account, checkbox and wording are vertically aligned');
+          }
+        } else {
+          assert.ok(bounds.wording.top >= bounds.account.bottom - 1, 'Long or narrow rows wrap wording below the account');
+        }
+        assert.ok(bounds.dialogOverflow <= 1, `Dialog overflow at ${width}px: ${bounds.dialogOverflow}`);
+        assert.ok(bounds.pageOverflow <= 1, `Page overflow at ${width}px: ${bounds.pageOverflow}`);
+        for (const control of bounds.controls) {
+          assert.ok(control.left >= bounds.dialog.left && control.right <= bounds.dialog.right, 'Credential controls remain inside the dialog');
+        }
+      }
+      await dialog.getByRole('button', { name: entry === 'single' ? 'Cancel' : 'Close', exact: true }).click();
+    }
+    fixture.assertHealthy();
+  });
+}
 
 test('ineligible targets show a notification and delayed previews cannot execute after leaving the list', { timeout: 45_000 }, async (t) => {
   const fixture = await createConsoleFixture(t);

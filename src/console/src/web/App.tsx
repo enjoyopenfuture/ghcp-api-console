@@ -1455,6 +1455,7 @@ function BatchCreateDialog(props: { open: boolean; remaining: number | null; onC
 }
 
 function CopilotOauthReauthorizationDialog(props: { account?: ProxyAccountDto; onClose: () => void; onDone: () => Promise<void> }) {
+  const passwordHelpId = useId();
   const [ssoPassword, setSsoPassword] = useState('');
   const [usingDefault, setUsingDefault] = useState(true);
   const [ssoType, setSsoType] = useState<SsoType>('custom');
@@ -1489,16 +1490,25 @@ function CopilotOauthReauthorizationDialog(props: { account?: ProxyAccountDto; o
   };
 
   return (
-    <Dialog title={`Reauthorize Copilot OAuth${props.account ? ` for ${props.account.identity}` : ''}`} description="Creates a new login task. Default passwords are resolved by SSO; overrides apply only to this authorization and are not stored." open={Boolean(props.account)} onClose={props.onClose}>
+    <Dialog title="Reauthorize Copilot OAuth" description="Creates a new login task. Default passwords are resolved by SSO; overrides apply only to this authorization and are not stored." open={Boolean(props.account)} onClose={props.onClose}>
       <FormGrid>
-        <label className="flex items-center gap-2 text-sm"><Checkbox checked={usingDefault} disabled={ssoType === 'azure'} onChange={(event) => { setUsingDefault(event.target.checked); setSsoPassword(''); }} /> {usingDefault ? 'Using default password' : 'Override password for this account'}</label>
-        {!usingDefault ? <Label text="SSO password override"><Input type="password" autoComplete="new-password" value={ssoPassword} onChange={(event) => setSsoPassword(event.target.value)} /></Label> : null}
+        <div className="min-w-0 space-y-1 md:col-span-2">
+          <label className="flex min-h-8 min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+            <span className="flex min-w-0 items-center gap-2">
+              <Checkbox checked={!usingDefault} disabled={ssoType === 'azure'} aria-describedby={passwordHelpId} onChange={(event) => { setUsingDefault(!event.target.checked); setSsoPassword(''); }} />
+              <span className="min-w-0 break-all font-mono">{props.account?.identity}</span>
+            </span>
+            <span className="rounded bg-blue-50 px-2 py-0.5 text-blue-900">Use a custom password instead of the default password</span>
+          </label>
+          <p id={passwordHelpId} className="text-xs text-slate-600">When unchecked, the default password resolved by SSO is used. When selected, enter the password for this account.{ssoType === 'azure' ? ' Azure requires a custom password for this account.' : ''}</p>
+        </div>
         <Label text="SSO type">
           <Select value={ssoType} onChange={(event) => { setSsoType(event.target.value as SsoType); if (event.target.value === 'azure') setUsingDefault(false); }}>
             <option value="custom">Custom</option>
             <option value="azure">Azure</option>
           </Select>
         </Label>
+        {!usingDefault ? <Label text="SSO password override"><Input type="password" autoComplete="new-password" value={ssoPassword} onChange={(event) => setSsoPassword(event.target.value)} /></Label> : null}
       </FormGrid>
       <DialogActions error={error} saving={saving} onCancel={props.onClose} onSubmit={submit} submitLabel="Create reauthorization task" />
     </Dialog>

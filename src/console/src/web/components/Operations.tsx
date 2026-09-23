@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { ManagementOperation, ManagementSelection, SsoType } from '@ghcp/shared';
 import { api, ConsoleApiError } from '../api/client.js';
 import { Button } from './ui/button.js';
@@ -296,6 +296,7 @@ export function useOperations(basePath: string | undefined, onChanged: (operatio
 
 export function OperationConfirmation({ controller }: { controller: ReturnType<typeof useOperations> }) {
   const { operation, error, busy } = controller;
+  const passwordHelpId = useId();
   const [page, setPage] = useState(1);
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   const [ssoType, setSsoType] = useState<SsoType>('custom');
@@ -310,20 +311,31 @@ export function OperationConfirmation({ controller }: { controller: ReturnType<t
     row.status === 'pending' && (row.requiresPasswordOverride || operation?.action === 'reauthorize' && ssoType === 'azure') && !overrides[row.id]);
   const confirming = preview && pending > 0 && (credentials || dangerous);
   const items = <div className="max-h-[45vh] overflow-auto">
-    {rows.slice((page - 1) * 25, page * 25).map((row) => <div key={row.id} className="space-y-1 border-b border-slate-200 py-2 text-sm">
-      <div className="flex flex-wrap items-center gap-2"><span className="break-all font-mono">{row.label ?? row.id}</span><Badge>{row.status}</Badge></div>
-      {row.label && row.label !== row.id ? <p className="break-all text-xs text-slate-500">{row.id}</p> : null}
-      {row.detail ? <p className="whitespace-pre-wrap break-words text-slate-600">{row.detail}</p> : null}
-      {row.relatedTaskId ? <p className="break-all text-xs text-slate-600">Login task: {row.relatedTaskId}</p> : null}
-      {preview && credentials && row.status === 'pending' ? <div>
-        <label className="flex min-h-8 items-center gap-2"><Checkbox checked={row.id in overrides} onChange={(event) => setOverrides((current) => {
-          const next = { ...current };
-          if (event.target.checked) next[row.id] = ''; else delete next[row.id];
-          return next;
-        })} />{row.id in overrides ? 'Override password for this account' : row.requiresPasswordOverride ? 'Password override required (Azure)' : 'Using default password'}</label>
-        {row.id in overrides ? <Input type="password" autoComplete="new-password" aria-label={`Password override for ${row.id}`} value={overrides[row.id]} onChange={(event) => setOverrides((current) => ({ ...current, [row.id]: event.target.value }))} /> : null}
-      </div> : null}
-    </div>)}
+    {rows.slice((page - 1) * 25, page * 25).map((row) => {
+      const credentialRow = preview && credentials && row.status === 'pending';
+      const requiresOverride = row.requiresPasswordOverride || operation?.action === 'reauthorize' && ssoType === 'azure';
+      return <div key={row.id} className="space-y-1 border-b border-slate-200 py-2 text-sm">
+        <div className="flex flex-wrap items-center gap-2">
+          {credentialRow ? <label className="flex min-h-8 min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="flex min-w-0 items-center gap-2">
+              <Checkbox checked={row.id in overrides} aria-describedby={passwordHelpId} onChange={(event) => setOverrides((current) => {
+                const next = { ...current };
+                if (event.target.checked) next[row.id] = ''; else delete next[row.id];
+                return next;
+              })} />
+              <span className="min-w-0 break-all font-mono">{row.label ?? row.id}</span>
+            </span>
+            <span className="rounded bg-blue-50 px-2 py-0.5 text-blue-900">Use a custom password instead of the default password</span>
+          </label> : <span className="break-all font-mono">{row.label ?? row.id}</span>}
+          <Badge>{row.status}</Badge>
+        </div>
+        {row.label && row.label !== row.id ? <p className="break-all text-xs text-slate-500">{row.id}</p> : null}
+        {row.detail ? <p className="whitespace-pre-wrap break-words text-slate-600">{row.detail}</p> : null}
+        {row.relatedTaskId ? <p className="break-all text-xs text-slate-600">Login task: {row.relatedTaskId}</p> : null}
+        {credentialRow && requiresOverride ? <p className="text-xs text-slate-600">Azure requires a custom password for this account.</p> : null}
+        {credentialRow && row.id in overrides ? <Input type="password" autoComplete="new-password" aria-label={`Password override for ${row.id}`} value={overrides[row.id]} onChange={(event) => setOverrides((current) => ({ ...current, [row.id]: event.target.value }))} /> : null}
+      </div>;
+    })}
     {rows.length > 25 ? <div className="mt-2 flex items-center gap-3"><Button variant="secondary" disabled={page <= 1} onClick={() => setPage(page - 1)}>Previous</Button><span>{page} / {Math.ceil(rows.length / 25)}</span><Button variant="secondary" disabled={page * 25 >= rows.length} onClick={() => setPage(page + 1)}>Next</Button></div> : null}
   </div>;
   return <>
@@ -337,7 +349,7 @@ export function OperationConfirmation({ controller }: { controller: ReturnType<t
       <div className="space-y-3">
         <p className="text-sm">{Object.entries(counts).map(([status, count]) => `${status}: ${count}`).join(' / ')}</p>
         <div className="rounded bg-blue-50 p-3 text-sm text-blue-900">
-          Using default passwords resolved by SSO. Passwords are not stored. Override only the accounts that need a different password; Azure accounts require overrides.
+          <p id={passwordHelpId}>When unchecked, the default password resolved by SSO is used. When selected, enter the password for this account. Passwords are not stored. Azure accounts require a custom password.</p>
           {operation?.action === 'reauthorize' ? <label className="mt-2 flex flex-wrap items-center gap-2">SSO provider <Select value={ssoType} onChange={(event) => setSsoType(event.target.value as SsoType)}>
             <option value="custom">Custom</option>
             <option value="azure">Azure</option>

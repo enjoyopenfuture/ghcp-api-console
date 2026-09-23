@@ -342,7 +342,7 @@ test('record identities and related tasks are plain text while details and row o
   const account = page.getByRole('row').filter({ has: page.getByRole('checkbox', { name: 'Select identity-0', exact: true }) });
   assert.equal(await account.getByRole('button', { name: 'Actions for identity-0', exact: true }).count(), 0);
   await account.getByRole('button', { name: 'Reauthorize', exact: true }).click();
-  const authorization = page.getByRole('dialog', { name: 'Reauthorize Copilot OAuth for identity-0', exact: true });
+  const authorization = page.getByRole('dialog', { name: 'Reauthorize Copilot OAuth', exact: true });
   await authorization.waitFor();
   await assertSurfaceContrast(page, 'account authorization');
   await authorization.getByRole('button', { name: 'Cancel', exact: true }).click();

@@ -172,11 +172,15 @@ export async function createConsoleFixture(t: TestContext) {
       data.operation = {
         id: data.nextOperationId, scope: base === paths.tasks ? 'tasks' : base === paths.users ? 'users' : 'accounts',
         action: req.body.action, status: 'preview', options: req.body.options,
-        items: ids.map((id) => ({
-          id, status: records.some((row) => row.id === id) ? 'pending' : 'skipped',
-          detail: records.some((row) => row.id === id) ? undefined : 'Fixture record was removed.',
-          requiresPasswordOverride: base === paths.tasks && data.tasks.find((task) => task.id === id)?.ssoType === 'azure',
-        })),
+        items: ids.map((id) => {
+          const task = base === paths.tasks ? data.tasks.find((task) => task.id === id) : undefined;
+          return {
+            id, label: task ? `${task.identity} / ${task.ssoUser}` : id,
+            status: records.some((row) => row.id === id) ? 'pending' : 'skipped',
+            detail: records.some((row) => row.id === id) ? undefined : 'Fixture record was removed.',
+            requiresPasswordOverride: task?.ssoType === 'azure',
+          };
+        }),
         createdAt: timestamp, updatedAt: timestamp, expiresAt: '2099-01-01T00:00:00.000Z',
       };
       data.operations.set(data.operation.id, data.operation);
