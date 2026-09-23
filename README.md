@@ -351,3 +351,11 @@ npm run start:console
 - 账号和 token 涉及敏感权限，不能提交 `.env`、SQLite 数据库、日志、Playwright trace、Copilot OAuth token 或 SSO 密码。
 - 错误诊断默认不脱敏，会保存原始入站请求、实际 Copilot 请求、Authorization/API Key、用户 prompt、工具内容和上游响应；必须像 token 数据库一样限制 `proxy-data` 和 Console 管理员访问。
 - EMU、SAML、SCIM、Copilot seat 配置依赖 GitHub Enterprise 管理权限；没有这些前提无法完整跑通批量账号和自动登录流程。
+
+
+## 已知问题
+- GH EMU模式下，删除GH Login有两种模式，其中一种是软删除，即，使用 PATCH 方式更新 GH Login 的状态值，执行完后，GH Login对应的唯一内部ID依然存在，并且关联的copilot坐席也都依然存在，只是copilot坐席会被标记为下个月失效。在软删除的GH Login被恢复时，关联的Copilot坐席也随之恢复，但是短时间（大约30分钟？）内在GH页面上无法看到该用户被分配了坐席，而只能通过API获得坐席的正确状态。同时也无法通过GH管理门户或者API再次授权Copilot坐席，在通过API分配时会遭遇422错误，错误信息如下。等待一段时间后，门户和API的Copilot坐席授权会恢复正常。此外，在软删除恢复时，该 GH Login 的Copilot坐席依然会被自动标记成下个月失效，如果需要恢复坐席需要再次授权。
+  ```text
+  username: Assign seat - GitHub Copilot seat assign failed for "username_shortcode": 422 {"message":"Seat assignment for user username_shortcode could not be created: Cannot refresh revoked seat assignment","documentation_url":"https://docs.github.com/rest/copilot/copilot-user-management#add-users-to-the-copilot-subscription-for-an-enterprise","status":"422"} Some external steps may have completed; check GitHub, seat and Proxy state before retrying.
+  ```
+- 硬删除：使用DELETE 掉用API删除 GH Login 以及对应的唯一ID，配套的Copilot 坐席也会被删除，但是最低消费的坐席计数会持续到月底。GH Login无法恢复，再次创建同样名字的账号，其唯一ID会发生变化，之前的Copilot坐席记录不会继承。
