@@ -26,7 +26,10 @@ test('sync_emu assigns a Copilot seat only when explicitly requested', async () 
     if (url.includes('/copilot/billing/selected_users') && init?.method === 'POST') {
       const body = JSON.parse(String(init.body)) as { selected_usernames: string[] };
       seatAssignments.push(...body.selected_usernames);
-      return jsonResponse(201, {});
+      return jsonResponse(201, { seats_created: 1 });
+    }
+    if (url.includes('/members/login-with-seat_emu/copilot')) {
+      return jsonResponse(200, { seats: [{ assignee: { login: 'login-with-seat_emu' }, pending_cancellation_date: null }] });
     }
     throw new Error(`Unexpected request: ${init?.method ?? 'GET'} ${url}`);
   };

@@ -1,9 +1,9 @@
-import type { BatchResult, CreateImportEmuPlanRequest, EnsureSsoUserResponse, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUsersRequest, ImportEmuUserStatus, PageResponse, SsoUserBatchRequest, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto } from '@ghcp/shared';
+import type { BatchResult, CopilotSeatOperation, CopilotSeatSnapshot, CreateImportEmuPlanRequest, EnsureSsoUserResponse, ImportEmuPlanDto, ImportEmuUserRow, ImportEmuUsersRequest, ImportEmuUserStatus, PageResponse, SsoUserBatchRequest, SsoUserBatchRow, SsoUserCapacityDto, SsoUserDto } from '@ghcp/shared';
 import { errorFields, loggerFor } from '@ghcp/shared';
 import { newBatchId, nowIso } from '@ghcp/shared';
 import { config } from '../config.js';
 import { hashPassword } from '../auth/password.js';
-import { assignCopilotSeat, CopilotSeatNotAssignedError, listCopilotSeatAssignments, removeCopilotSeat } from '../copilot/seats.js';
+import { assignCopilotSeat, CopilotSeatNotAssignedError, getCopilotSeatAssignment, isCancellationDate, listCopilotSeatAssignments, removeCopilotSeat } from '../copilot/seats.js';
 import { getDb } from '../db/connection.js';
 import {
   createEmuImportPlanRecord,
@@ -25,6 +25,7 @@ import {
   getUser,
   getUserByGhLogin,
   listAllUsers,
+  recordCopilotSeatError,
   toDto,
   updateEmu,
   updateCopilotSeat,
@@ -178,7 +179,8 @@ export async function deleteEmuUser(ssoUser: string): Promise<SsoUserOperationOu
   logger.info('delete-emu-start', 'Deleting provisioned GH login', { ssoUser, ghScimId: user.ghScimId });
   const seatRemoval = await removeCopilotSeatForUser(user);
   await deleteProvisionedUser(user);
-  const updated = updateEmu(ssoUser, { emuStatus: 'not_synced' });
+  updateEmu(ssoUser, { emuStatus: 'not_synced' });
+  const updated = updateCopilotSeat(ssoUser, { status: 'unassigned', lastOperation: 'remove' });
   logger.info('delete-emu-done', 'Deleted provisioned GH login', { ssoUser });
   return { user: toDto(updated), warning: seatRemoval.warning };
 }
@@ -194,7 +196,10 @@ export async function removeCopilotSeatForSsoUser(ssoUser: string): Promise<SsoU
   const user = requireUser(ssoUser);
   const result = await removeCopilotSeatForUser(user);
   if (!result.warning) {
-    logger.info('remove-copilot-seat', 'Removed GitHub Copilot seat', { ssoUser, ghLogin: result.user.ghLogin });
+    logger.info('remove-copilot-seat', 'Updated GitHub direct Copilot seat cancellation', {
+      ssoUser, ghLogin: result.user.ghLogin, status: result.user.copilotSeatStatus,
+      pendingCancellationDate: result.user.copilotSeatPendingCancellationDate,
+    });
   }
   return { user: toDto(result.user), warning: result.warning };
 }
@@ -240,10 +245,10 @@ export async function importEmuUsers(input: ImportEmuUsersRequest = {}): Promise
 export async function createEmuImportPlan(input: CreateImportEmuPlanRequest = {}): Promise<ImportEmuPlanDto> {
   const targetSsoUser = input.ssoUser?.trim();
   const scimUsers = await loadScimUsersForImport(targetSsoUser);
-  const assignedCopilotGhLogins = scimUsers.length > 0 ? await listCopilotSeatAssignments() : new Set<string>();
+  const copilotSeats = scimUsers.length > 0 ? await listCopilotSeatAssignments() : new Map<string, CopilotSeatSnapshot>();
   const settings = getSsoRuntimeSettings();
   const plannedRows = scimUsers.length > 0
-    ? buildEmuImportPlan(scimUsers, assignedCopilotGhLogins, settings.emailDomain)
+    ? buildEmuImportPlan(scimUsers, copilotSeats, settings.emailDomain)
     : [{ ssoUser: targetSsoUser ?? '', status: 'failed', detail: 'GH SCIM user was not found.' } satisfies PlannedEmuImportRow];
   const plan = createEmuImportPlanRecord({
     id: newBatchId(),
@@ -356,7 +361,7 @@ async function runSsoUserBatchRow(ssoUser: string, input: SsoUserBatchRequest): 
 async function runBatchResultRow(ssoUser: string, input: SsoUserBatchRequest): Promise<SsoUserBatchRow> {
   try {
     const outcome = await runSsoUserBatchRow(ssoUser, input);
-    return { ssoUser, status: 'success', detail: batchSuccessDetail(input), user: outcome.user, warning: outcome.warning };
+    return { ssoUser, status: 'success', detail: batchSuccessDetail(input, outcome.user), user: outcome.user, warning: outcome.warning };
   } catch (err) {
     return { ssoUser, status: 'failed', detail: err instanceof Error ? err.message : String(err) };
   }
@@ -390,7 +395,7 @@ function uniqueSsoUsers(ssoUsers: string[]): string[] {
   return result;
 }
 
-function batchSuccessDetail(input: SsoUserBatchRequest): string {
+function batchSuccessDetail(input: SsoUserBatchRequest, user?: SsoUserDto): string {
   switch (input.operation) {
     case 'sync_emu':
       return input.assignCopilotSeat
@@ -399,7 +404,9 @@ function batchSuccessDetail(input: SsoUserBatchRequest): string {
     case 'assign_copilot':
       return 'Assigned Copilot seat.';
     case 'remove_copilot':
-      return 'Removed Copilot seat.';
+      return user?.copilotSeatStatus === 'pending_cancellation'
+        ? `Direct Copilot seat: cancell at ${user.copilotSeatPendingCancellationDate}.`
+        : 'No enterprise direct Copilot seat is assigned.';
     case 'suspend_emu':
       return 'Suspended in EMU.';
     case 'delete_emu':
@@ -418,12 +425,11 @@ async function assignCopilotSeatForUser(user: SsoUserRecord, ghLogin = user.ghLo
   }
   try {
     await assignCopilotSeat(ghLogin);
-    return updateCopilotSeat(user.ssoUser, { status: 'assigned', lastOperation: 'assign' });
   } catch (err) {
-    const updated = updateCopilotSeat(user.ssoUser, { status: 'assign_failed', lastOperation: 'assign', lastError: errorMessage(err) });
-    logger.error('assign-copilot-seat-failed', 'Failed to assign GitHub Copilot seat', { ssoUser: updated.ssoUser, ghLogin, ...errorFields(err) });
+    recordSeatMutationFailure(user, 'assign', err);
     throw err;
   }
+  return confirmSeatMutation(user, ghLogin, 'assign');
 }
 
 async function removeCopilotSeatForUser(user: SsoUserRecord): Promise<CopilotSeatRemovalOutcome> {
@@ -433,7 +439,6 @@ async function removeCopilotSeatForUser(user: SsoUserRecord): Promise<CopilotSea
   }
   try {
     await removeCopilotSeat(user.ghLogin);
-    return { user: updateCopilotSeat(user.ssoUser, { status: 'unassigned', lastOperation: 'remove' }) };
   } catch (err) {
     if (err instanceof CopilotSeatNotAssignedError) {
       const warning = `GitHub user "${user.ghLogin}" has no Copilot seat; seat removal was skipped.`;
@@ -445,10 +450,42 @@ async function removeCopilotSeatForUser(user: SsoUserRecord): Promise<CopilotSea
       });
       return { user: updated, warning };
     }
-    const updated = updateCopilotSeat(user.ssoUser, { status: 'remove_failed', lastOperation: 'remove', lastError: errorMessage(err) });
-    logger.error('remove-copilot-seat-failed', 'Failed to remove GitHub Copilot seat', { ssoUser: updated.ssoUser, ghLogin: user.ghLogin, ...errorFields(err) });
+    recordSeatMutationFailure(user, 'remove', err);
     throw err;
   }
+  return { user: await confirmSeatMutation(user, user.ghLogin, 'remove') };
+}
+
+function recordSeatMutationFailure(user: SsoUserRecord, operation: CopilotSeatOperation, err: unknown): void {
+  if (['assigned', 'pending_cancellation', 'unassigned'].includes(user.copilotSeatStatus)) {
+    recordCopilotSeatError(user.ssoUser, operation, errorMessage(err));
+  } else {
+    updateCopilotSeat(user.ssoUser, {
+      status: operation === 'assign' ? 'assign_failed' : 'remove_failed',
+      lastOperation: operation, lastError: errorMessage(err),
+    });
+  }
+  logger.error(`${operation}-copilot-seat-failed`, 'GitHub Copilot seat operation failed', { ssoUser: user.ssoUser, ghLogin: user.ghLogin, ...errorFields(err) });
+}
+
+async function confirmSeatMutation(user: SsoUserRecord, ghLogin: string, operation: CopilotSeatOperation): Promise<SsoUserRecord> {
+  let seat: CopilotSeatSnapshot;
+  try {
+    seat = await getCopilotSeatAssignment(ghLogin);
+  } catch (err) {
+    const message = `GitHub accepted the Copilot seat ${operation} request, but seat status/date synchronization failed: ${errorMessage(err)} Previous confirmed state was kept. Import from GH to confirm.`;
+    recordCopilotSeatError(user.ssoUser, operation, message);
+    logger.error('copilot-seat-readback-failed', message, { ssoUser: user.ssoUser, ghLogin, ...errorFields(err) });
+    throw new Error(message, { cause: err });
+  }
+  const updated = updateCopilotSeat(user.ssoUser, { ...seat, lastOperation: operation });
+  if ((operation === 'assign' && seat.status !== 'assigned') || (operation === 'remove' && seat.status === 'assigned')) {
+    const message = `GitHub accepted the Copilot seat ${operation} request, but the direct seat is still ${seat.status}. The requested change is not yet confirmed; Import from GH or retry to check its state.`;
+    recordCopilotSeatError(user.ssoUser, operation, message);
+    logger.warn('copilot-seat-change-unconfirmed', message, { ssoUser: user.ssoUser, ghLogin });
+    throw new Error(message);
+  }
+  return updated;
 }
 
 function enterpriseRoleForSsoUser(user: SsoUserRecord): ScimEnterpriseRole {
@@ -480,8 +517,8 @@ function listAllStoredEmuImportPlanRows(planId: string): ImportEmuUserRow[] {
   }
 }
 
-function buildEmuImportPlan(scimUsers: ScimUserResource[], assignedCopilotGhLogins: ReadonlySet<string>, emailDomain: string): PlannedEmuImportRow[] {
-  const candidates = scimUsers.map((scimUser) => toPlannedCandidate(scimUser, assignedCopilotGhLogins, emailDomain));
+function buildEmuImportPlan(scimUsers: ScimUserResource[], copilotSeats: ReadonlyMap<string, CopilotSeatSnapshot>, emailDomain: string): PlannedEmuImportRow[] {
+  const candidates = scimUsers.map((scimUser) => toPlannedCandidate(scimUser, copilotSeats, emailDomain));
   const duplicateSsoUsers = duplicateValues(candidates.filter(hasScimUser).map((row) => row.ssoUser));
   const localUsers = listAllUsers();
   const localBySsoUser = new Map(localUsers.map((user) => [user.ssoUser.toLowerCase(), user]));
@@ -512,7 +549,7 @@ function buildEmuImportPlan(scimUsers: ScimUserResource[], assignedCopilotGhLogi
         ...candidate,
         action: 'create',
         status: 'pending_create',
-        detail: `Will create SSO user using the configured default password policy. Copilot seat: ${candidate.copilotSeatStatus}.`,
+        detail: `Will create SSO user using the configured default password policy. Direct Copilot seat: ${importSeatDescription(candidate)}.`,
       };
     }
     if (isAlreadyAligned(existing, candidate)) {
@@ -522,12 +559,12 @@ function buildEmuImportPlan(scimUsers: ScimUserResource[], assignedCopilotGhLogi
       ...candidate,
       action: 'update',
       status: 'pending_update',
-      detail: `Will update local GH metadata and Copilot seat status to ${candidate.copilotSeatStatus}.`,
+      detail: `Will update local GH metadata. Direct Copilot seat: ${importSeatDescription(candidate)}.`,
     };
   });
 }
 
-function toPlannedCandidate(scimUser: ScimUserResource, assignedCopilotGhLogins: ReadonlySet<string>, emailDomain: string): PlannedEmuImportRow {
+function toPlannedCandidate(scimUser: ScimUserResource, copilotSeats: ReadonlyMap<string, CopilotSeatSnapshot>, emailDomain: string): PlannedEmuImportRow {
   if (!scimUser.id) {
     return {
       ssoUser: ssoUserFromScimUser(scimUser),
@@ -548,14 +585,15 @@ function toPlannedCandidate(scimUser: ScimUserResource, assignedCopilotGhLogins:
   }
   const ghLogin = ghLoginFromScimUser(scimUser, ssoUser);
   const emuStatus = scimUser.active === false ? 'suspended' : 'active';
-  const copilotSeatStatus = assignedCopilotGhLogins.has(ghLogin.toLowerCase()) ? 'assigned' : 'unassigned';
+  const seat = copilotSeats.get(ghLogin.toLowerCase()) ?? { status: 'unassigned' };
   return {
     ssoUser,
     email: primaryEmail(scimUser) || `${ssoUser}@${emailDomain}`,
     ghLogin,
     ghScimId: scimUser.id,
     emuStatus,
-    copilotSeatStatus,
+    copilotSeatStatus: seat.status,
+    copilotSeatPendingCancellationDate: seat.pendingCancellationDate,
     status: 'pending_update',
     detail: '',
     scimUser,
@@ -578,7 +616,7 @@ function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
     const { passwordHash, salt } = hashPassword(password);
     const created = createUser({ ssoUser: row.ssoUser, passwordHash, salt, email: row.email, role: 'user' });
     updateEmu(created.ssoUser, { ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
-    const updated = updateCopilotSeatFromGitHub(created.ssoUser, row.copilotSeatStatus);
+    const updated = updateCopilotSeatFromGitHub(created.ssoUser, importSeatSnapshot(row));
     appendUserEvent('import_emu_create', updated);
     logger.info('import-emu-user-created', 'Recreated SSO user from GH SCIM user', { ssoUser: row.ssoUser, ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
     return {
@@ -589,13 +627,13 @@ function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
       emuStatus: updated.emuStatus,
       status: 'created',
       copilotSeatStatus: row.copilotSeatStatus,
-      detail: `Created SSO user using the configured default password policy. Copilot seat: ${updated.copilotSeatStatus}.`,
+      detail: `Created SSO user using the configured default password policy. Direct Copilot seat: ${importSeatDescription(row)}.`,
     };
   }
   if (row.action === 'update') {
     updateUser(row.ssoUser, { email: row.email });
     updateEmu(row.ssoUser, { ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
-    const updated = updateCopilotSeatFromGitHub(row.ssoUser, row.copilotSeatStatus);
+    const updated = updateCopilotSeatFromGitHub(row.ssoUser, importSeatSnapshot(row));
     logger.info('import-emu-user-updated', 'Updated SSO user from GH SCIM user', { ssoUser: row.ssoUser, ghLogin: row.ghLogin, ghScimId: row.ghScimId, emuStatus: row.emuStatus });
     return {
       ...toImportRow(row),
@@ -605,7 +643,7 @@ function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
       emuStatus: updated.emuStatus,
       status: 'updated',
       copilotSeatStatus: row.copilotSeatStatus,
-      detail: `Updated SSO user from GH SCIM. Copilot seat: ${updated.copilotSeatStatus}.`,
+      detail: `Updated SSO user from GH SCIM. Direct Copilot seat: ${importSeatDescription(row)}.`,
     };
   }
   return { ...toImportRow(row), status: 'failed', detail: 'Import plan row has no applicable action.' };
@@ -613,6 +651,9 @@ function applyEmuImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
 
 function staleConflictForRow(row: EmuImportPlanRowRecord, localBySsoUser: Map<string, SsoUserRecord>, localByScimId: Map<string, SsoUserRecord>): string | undefined {
   if (!row.ghScimId || !row.ghLogin || !row.email || !row.emuStatus || !row.copilotSeatStatus) return 'Import plan row is incomplete.';
+  if (row.copilotSeatStatus === 'pending_cancellation' && !isCancellationDate(row.copilotSeatPendingCancellationDate)) {
+    return 'Import plan has an invalid pending cancellation date. Preview again before applying.';
+  }
   const existing = localBySsoUser.get(row.ssoUser.toLowerCase());
   const boundLocalUser = localByScimId.get(row.ghScimId);
   if (boundLocalUser && boundLocalUser.ssoUser.toLowerCase() !== row.ssoUser.toLowerCase()) {
@@ -634,6 +675,7 @@ function toImportRow(row: PlannedEmuImportRow): ImportEmuUserRow {
     ghScimId: row.ghScimId,
     emuStatus: row.emuStatus,
     copilotSeatStatus: row.copilotSeatStatus,
+    copilotSeatPendingCancellationDate: row.copilotSeatPendingCancellationDate,
     status: row.status,
     detail: row.detail,
   };
@@ -667,7 +709,23 @@ function isAlreadyAligned(existing: SsoUserRecord, row: PlannedEmuImportRow): bo
     && existing.ghLogin === row.ghLogin
     && existing.ghScimId === row.ghScimId
     && existing.emuStatus === row.emuStatus
-    && existing.copilotSeatStatus === row.copilotSeatStatus;
+    && existing.copilotSeatStatus === row.copilotSeatStatus
+    && existing.copilotSeatPendingCancellationDate === row.copilotSeatPendingCancellationDate
+    && !existing.copilotSeatLastError;
+}
+
+function importSeatSnapshot(row: ImportEmuUserRow): CopilotSeatSnapshot {
+  if (row.copilotSeatStatus === 'pending_cancellation' && isCancellationDate(row.copilotSeatPendingCancellationDate)) {
+    return { status: 'pending_cancellation', pendingCancellationDate: row.copilotSeatPendingCancellationDate };
+  }
+  if (row.copilotSeatStatus === 'assigned' || row.copilotSeatStatus === 'unassigned') return { status: row.copilotSeatStatus };
+  throw new Error('Import plan has an invalid Copilot seat snapshot. Preview again before applying.');
+}
+
+function importSeatDescription(row: ImportEmuUserRow): string {
+  return row.copilotSeatStatus === 'pending_cancellation'
+    ? `cancell at ${row.copilotSeatPendingCancellationDate}`
+    : String(row.copilotSeatStatus);
 }
 
 function batchResult(startedAt: string, rows: ImportEmuUserRow[]): BatchResult<ImportEmuUserRow> {

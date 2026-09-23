@@ -1,5 +1,9 @@
 import type { CopilotOauthStatus, CopilotSeatStatus, EmuStatus, LoginTaskStatus } from '@ghcp/shared';
 
+export function formatCopilotSeat(status: CopilotSeatStatus, pendingCancellationDate?: string): string {
+  return status === 'pending_cancellation' ? `cancell at ${pendingCancellationDate ?? '(date unavailable)'}` : status;
+}
+
 export function formatDate(value?: string): string {
   if (!value) return '-';
   const date = new Date(value);
@@ -53,6 +57,7 @@ export function statusTone(status?: CopilotOauthStatus | CopilotSeatStatus | Emu
     case 'missing':
     case 'not_synced':
     case 'unknown':
+    case 'pending_cancellation':
       return 'warning';
     case 'failed':
     case 'assign_failed':

@@ -367,7 +367,7 @@ function destructiveWarning(operation: ManagementOperation | undefined): string 
   if (operation?.action === 'delete_sso') return 'Removes Copilot seats, deletes provisioned GitHub users and associated Proxy accounts/request statistics, then deletes local SSO users. Deleted data cannot be recovered here.';
   if (operation?.action === 'delete_emu') return 'Removes Copilot seats and deletes provisioned GitHub users. Local SSO users and Proxy records remain; their authorization may no longer work.';
   if (operation?.action === 'suspend_emu') return 'Suspends the selected GitHub users and interrupts their GitHub access. Local SSO users and Proxy records remain.';
-  return 'Removes Copilot seats for the selected users. SSO, GitHub and Proxy records remain. Seat removal can interrupt Copilot access.';
+  return 'Schedules cancellation of enterprise direct Copilot seats at the next billing cycle date returned by GitHub, not immediate loss of access. SSO, GitHub and Proxy records remain. Organization/team access is unchanged. Use Import from GH or Remove seat again to confirm the state after that date.';
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

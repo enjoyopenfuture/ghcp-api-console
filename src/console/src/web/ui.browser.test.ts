@@ -255,7 +255,7 @@ test('list toolbars expose contextual actions, accessible tooltips and persisten
   assert.equal(await toolbar.getByRole('button', { name: 'Filters', exact: true }).isVisible(), true);
   assert.equal(await selection.getByRole('button', { name: 'Reauthorize selected', exact: true }).isVisible(), true);
   assert.equal(await selection.getByRole('button', { name: 'Selection actions', exact: true }).count(), 0);
-  await page.getByRole('button', { name: 'Select all 2 matches', exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: /^Select all \d+ matches$/ }).count(), 0);
   await page.getByRole('button', { name: 'Export selected', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Delete selected', exact: true }).waitFor();
   await assertContainedLayout(page, 'Expanded selection toolbar');

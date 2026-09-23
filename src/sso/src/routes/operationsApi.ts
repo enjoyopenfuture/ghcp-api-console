@@ -11,7 +11,7 @@ export const userOperationsRouter = operationRoutes({
   resolve: (selection) => withSqliteReadSnapshot(getDb(), (database) => resolveOperationSelection(selection, async (query) => listUsers(query, database), (user) => user.ssoUser)),
   async snapshot(id) {
     const user = getUser(id);
-    return { revision: user ? JSON.stringify([user.updatedAt, user.ghLogin, user.emuStatus, user.copilotSeatStatus, user.role, user.email]) : undefined, label: id };
+    return { revision: user ? JSON.stringify([user.updatedAt, user.ghLogin, user.emuStatus, user.copilotSeatStatus, user.copilotSeatPendingCancellationDate, user.role, user.email]) : undefined, label: id };
   },
   concurrency: (action) => action === 'sync_emu' ? getSsoRuntimeSettings().bulkSyncConcurrency : 1,
   async eligibility(_action, id) { return getUser(id) ? undefined : 'The SSO user was removed.'; },

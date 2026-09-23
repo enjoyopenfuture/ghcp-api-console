@@ -43,6 +43,14 @@ Console 解决“运维/开发人员如何集中管理各服务状态和手动�
 | Error Diagnostics | `ErrorDiagnosticsPage` | 分页查看 Copilot 上游失败摘要，预览含 headers/body/curl 的人类可读日志，下载完整 `.log`，清空诊断文件。 |
 | Diagnostics | `DiagnosticsPage` | 调用 proxy/sso/login-service 代理路由检查服务连通性和内部 token 是否匹配。 |
 
+### Copilot 直接席位状态
+
+SSO Users 的 Copilot seat 只展示企业直接分配的席位，不合并组织或团队授权。正常状态为 `assigned`、`unassigned` 和待取消状态 `pending_cancellation`；待取消时列表与 Import from GH 预览/结果统一显示 **`cancell at <日期>`**。日期直接来自 GitHub 的 `pending_cancellation_date`，不按本地时区转换或推算自然月 1 号。筛选值与导出中的状态仍为 `pending_cancellation`，CSV 另含 `copilotSeatPendingCancellationDate` 列。
+
+**Remove seat** 安排按 GitHub 返回的下个计费周期日期取消，并非立即移除权限。到期后页面仍保留最后同步状态，可通过 **Import from GH** 或再次 **Remove seat** 确认 `unassigned`；**Assign seat** 确认恢复后清除日期。请求已受理但状态回读失败时，显示明确错误并保留之前的状态和日期。未分配直接席位并不代表没有组织/团队权限；仅取消席位不会删除 SSO/GH/Proxy 记录或提前作废 token。
+
+Import from GH 先预览、后应用冻结的状态/日期快照；期间发生席位变更时应重新 Preview。升级前未应用的旧预览需要重新生成。AI Credits 的席位数与月成本估算包含待取消席位，只有显式同步确认未分配后才扣除；数据可能滞后，不代表实际账单。Proxy 自动初始化的现有自动分配行为不变，仍可能恢复待取消席位。
+
 ### 与 proxy/sso/login 的交互
 
 Console 前端不直接访问这些服务；所有请求先到 Console：
@@ -300,9 +308,9 @@ interface ConsoleSession {
 
 ### 统一列表与批量操作
 
-`ManagedList` 提供 10 / 25 / 50 / 100 分页（默认 25）、多页时的页码跳转、稳定排序、筛选草稿/应用、URL hash 状态、跨页选择及全匹配排除项、列显隐、紧凑模式和表格内横向滚动。每页条数/列/密度写入本地偏好；选择和滚动现场仅在当前页面会话保留。缓存的列偏好优先于新默认配置。
+`ManagedList` 提供 10 / 25 / 50 / 100 分页（默认 25）、多页时的页码跳转、稳定排序、筛选草稿/应用、URL hash 状态、表头当前页全选和逐行跨页选择、列显隐、紧凑模式和表格内横向滚动。每页条数/列/密度写入本地偏好；选择和滚动现场仅在当前页面会话保留。缓存的列偏好优先于新默认配置。
 
-搜索/筛选、表格和分页位于同一容器。所有列表的批量操作区常驻，动作按钮、选择全部匹配记录、导出选中项和清除选择在空选择时也不隐藏；需要目标的操作在未选择记录时禁用，空间不足时自动换行。搜索和筛选始终保留，不随选择切换。全匹配选择保留排除项，全部选中后按钮保持显示并禁用；出现排除项后可再次点击全选恢复。View 只管理列和密度，Export 提供当前页/全部匹配的导出。SSO 用户的 CSV/GH 导入位于 Import，“同步时分配席位”常驻批量操作区，可在选择记录前设置。
+搜索/筛选、表格和分页位于同一容器。所有列表的批量操作区常驻，动作按钮、导出选中项和清除选择在空选择时也不隐藏；需要目标的操作在未选择记录时禁用，空间不足时自动换行。搜索和筛选始终保留，不随选择切换。不提供 `Select all N matches` 按钮；表头复选框只选择当前页，翻页保留已勾选记录。View 只管理列和密度，Export 提供当前页/全部匹配的导出。SSO 用户的 CSV/GH 导入位于 Import，“同步时分配席位”常驻批量操作区，可在选择记录前设置。
 
 Login Tasks 的 Status 使用可多选下拉菜单，不再使用常驻列表框；未选表示全部状态，勾选或清空后点击 Apply filters 才会提交，URL 仍支持多个状态。Task 列直接显示完整 ID 并保留复制按钮，点击 ID 不会打开详情；任务详情和日志查看入口移至行内更多菜单的 Details。
 

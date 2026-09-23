@@ -41,7 +41,7 @@ import { Notification, NotificationProvider } from './components/ui/notification
 import { Select } from './components/ui/select.js';
 import { Table, Th, Td } from './components/ui/table.js';
 import { Textarea } from './components/ui/textarea.js';
-import { formatDate, formatNumber, statusTone, tokenTotal } from './lib/format.js';
+import { formatCopilotSeat, formatDate, formatNumber, statusTone, tokenTotal } from './lib/format.js';
 
 interface SetupState {
   initialized: boolean;
@@ -355,6 +355,7 @@ function UsersPage(props: { notify: Notify }) {
   const reload = async () => { setRevision((value) => value + 1); };
   return <div className="space-y-4">
     {capacityError ? <ErrorState message={capacityError} /> : null}
+    <p className="text-xs text-slate-600">Copilot seats show enterprise direct assignments only, not organization or team access. States reflect the last GitHub sync; use Import from GH or Remove seat to confirm a cancellation after its date.</p>
     <ManagedList<SsoUserDto>
       scope="users" path="/api/console/sso/users" identify={(user) => user.ssoUser} refreshKey={revision} onNotify={props.notify}
       followSubmittedActions
@@ -368,7 +369,7 @@ function UsersPage(props: { notify: Notify }) {
       }}
       filters={[
         { key: 'status', label: 'GH status', options: ['active', 'suspended', 'deleted', 'not_synced'] },
-        { key: 'seatStatus', label: 'Copilot seat', options: ['unknown', 'assigned', 'unassigned', 'assign_failed', 'remove_failed'] },
+        { key: 'seatStatus', label: 'Copilot seat', options: ['unknown', 'assigned', 'pending_cancellation', 'unassigned', 'assign_failed', 'remove_failed'] },
         { key: 'role', label: 'Role', options: ['user', 'admin'] },
       ]}
       toolbar={<>
@@ -414,7 +415,9 @@ function CopilotSeatCell(props: { user: SsoUserDto }) {
   const updated = props.user.copilotSeatUpdatedAt ? formatDate(props.user.copilotSeatUpdatedAt) : undefined;
   return (
     <div className="flex max-w-48 items-center gap-1.5">
-      <Badge tone={statusTone(props.user.copilotSeatStatus)} title={updated}>{props.user.copilotSeatStatus}</Badge>
+      <Badge tone={statusTone(props.user.copilotSeatStatus)} title={updated}>
+        {formatCopilotSeat(props.user.copilotSeatStatus, props.user.copilotSeatPendingCancellationDate)}
+      </Badge>
       {props.user.copilotSeatLastError ? (
         <span
           className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-red-50 text-xs font-bold text-red-700"
@@ -482,8 +485,8 @@ function AiCreditsUsagePage(props: { notify: Notify }) {
             <MetricCard title={`${periodLabel(usage.lastMonth)} usage`} value={formatAiUnits(usage.lastMonth.quantity)} detail={usage.lastMonth.unitType ?? 'AI Credits'} />
             <MetricCard title={`${periodLabel(usage.currentMonth)} usage`} value={formatAiUnits(usage.currentMonth.quantity)} detail={usage.currentMonth.unitType ?? 'AI Credits'} />
             <MetricCard title="Projected this month" value={formatAiUnits(usage.projectedCurrentMonthQuantity)} detail="Based on daily average so far" />
-            <MetricCard title="Assigned seats" value={usage.assignedSeatCount} detail="Tracked in SSO Copilot seat status" />
-            <MetricCard title="Seat monthly cost" value={formatCurrency(usage.assignedSeatMonthlyCost)} detail={`${formatCurrency(usage.seatPricePerMonth)} x ${usage.assignedSeatCount} seat(s)`} />
+            <MetricCard title="Assigned seats" value={usage.assignedSeatCount} detail="Last-synced enterprise direct seats, including pending cancellations; may be stale." />
+            <MetricCard title="Seat monthly cost" value={formatCurrency(usage.assignedSeatMonthlyCost)} detail={`${formatCurrency(usage.seatPricePerMonth)} x ${usage.assignedSeatCount} seat(s). Local estimate, not a GitHub invoice.`} />
           </div>
           <Card>
             <div className="grid gap-3 text-sm md:grid-cols-3">
@@ -1302,7 +1305,7 @@ function ImportEmuUsersDialog(props: { open: boolean; onClose: () => void; onDon
   return (
     <><Dialog
       title="Import SSO users from GH"
-      description="Preview GitHub SCIM and Enterprise Copilot seat alignment, then apply safe local create/update rows. Leave SSO user blank to scan all users."
+      description="Preview GitHub SCIM and enterprise direct Copilot seats, including cancellation dates. Apply uses this snapshot; preview again after seat changes. Organization/team access is excluded. Leave SSO user blank to scan all users."
       open={props.open}
       onClose={props.onClose}
     >
@@ -1386,7 +1389,7 @@ function EmuImportResult(props: {
             <div className="flex flex-wrap items-center gap-2"><span>#{row.rowIndex ?? '-'} {row.ssoUser || '-'}</span><Badge tone={statusTone(row.status)}>{row.status}</Badge></div>
             <p className="mt-1 break-words text-xs text-slate-600">{row.detail}</p>
             {row.ghLogin ? <p className="mt-1 text-xs text-slate-600">GH login: {row.ghLogin}</p> : null}
-            {row.copilotSeatStatus ? <p className="text-xs text-slate-600">Copilot seat: {row.copilotSeatStatus}</p> : null}
+            {row.copilotSeatStatus ? <p className="text-xs text-slate-600">Direct Copilot seat: {formatCopilotSeat(row.copilotSeatStatus, row.copilotSeatPendingCancellationDate)}</p> : null}
           </li>
         ))}
         {props.rows.length === 0 ? <li className="text-slate-500">No rows match this filter.</li> : null}

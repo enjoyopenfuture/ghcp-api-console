@@ -47,16 +47,24 @@ SSO 数据库只保存 scrypt 密码哈希和 salt，不能还原用户的明文
 - enterprise role 可由请求显式传入；未传时本地 `role=admin` 映射为 `enterprise_owner`，其他映射为 `user`。
 - `suspend_emu`：PATCH SCIM user 的 `active=false`，并标记 `emuStatus=suspended`。
 - `delete_emu`：移除 Copilot seat、删除 SCIM user，并将本地 EMU 信息重置为 `not_synced`。
-- 反向导入：从 SCIM 拉取用户并分页读取 Enterprise Copilot seats 生成 preview plan，apply 时同步本地身份映射和 `copilot_seat_status`。
+- 反向导入：从 SCIM 拉取用户并完整分页读取 Enterprise Copilot seats 生成 preview plan，apply 时同步本地身份映射、企业直接席位状态和待取消日期。组织或团队来源不计入直接席位。
 - SCIM 请求支持节流和对 `429`、`5xx`、带 `retry-after` 的 `403` 重试。
 
 ### Copilot seats 与 AI Credits
 
 - `sync_emu` 默认只同步 GH login；请求显式传入 `assignCopilotSeat=true` 时才会继续尝试分配 Copilot seat。
-- 可单独调用 assign/remove seat API。
-- seat 状态写入 `sso_users.copilot_seat_*`；失败会记录 `assign_failed` / `remove_failed` 和错误信息。
+- 可单独调用 assign/remove seat API；变更受理后通过企业级 `GET /enterprises/{enterprise}/members/{username}/copilot` 回读 `{ total_seats, seats }` 确认状态。
+- 正常状态为 `assigned`、`pending_cancellation`、`unassigned`。取消接口只返回 `seats_cancelled` 数量，不代表立即失去权限；待取消日期来自 GH 的 `pending_cancellation_date`，保存为 `copilotSeatPendingCancellationDate`（`YYYY-MM-DD`），Console 显示 `cancell at <日期>`。不推算下个月 1 号、不进行本地时区换算。
+- 这里只跟踪**企业直接分配**的席位：排除有 `organization` 或 `assigning_team` 来源的记录。因此 `unassigned` 不代表账号不能通过组织或团队使用 Copilot。
+- 到期后保持最后确认状态；使用 **Import from GH** 或再次 **Remove seat** 确认未分配后，才写 `unassigned` 并清除日期。没有按时钟自动失效或后台对账。**Assign seat** 确认恢复后写 `assigned` 并清除日期。
+- seat 状态写入 `sso_users.copilot_seat_*`。失败保留已有的 assigned/pending_cancellation/unassigned 快照并记录错误；尚无已确认状态时，变更失败记录 `assign_failed` / `remove_failed`。变更已受理但回读失败时，保留状态、日期和上次成功同步时间，API/批量结果明确报告“请求已受理、同步失败”；不会猜日期或返回虚假的成功。
+- Import from GH 的预览、存储行、分页结果及 apply 都携带状态与日期；仅日期变化也会更新。Apply 使用**预览时快照**，席位变更后需重新 Preview；查询失败不会生成全员未分配的计划。
 - AI Credits 刷新会查询 GitHub billing usage summary，固定使用 `sku=copilot_ai_unit`，缓存上月和本月用量。
-- seat 月成本在代码中固定按 `19 * assignedSeatCount` 计算。
+- seat 月成本固定按 `19 * assignedSeatCount` 估算；数量包含最后同步的 assigned 和 pending_cancellation 直接席位，即使日期已过也要确认未分配后才扣除。这是可能滞后的本地估算，不是 GitHub 账单。
+
+升级时 SQLite 自动为用户与导入行增加 `copilot_seat_pending_cancellation_date`。旧的未应用预览会标为 conflict，要求重新 Preview；已应用历史保留。升级后应重新执行一次全量 Import from GH 校正旧二态数据，不通过数据库迁移猜测旧 `unassigned` 是否实际待取消。
+
+仅 Remove seat 不删除 SSO/GH/Proxy 记录或作废 OAuth token；删除/暂停 GH 用户仍有其独立的权限影响。Proxy 未知 identity 初始化继续按原逻辑显式分配席位，因此仍可能恢复待取消的直接席位，本次不增加阻止该行为的策略。
 
 ### 与 proxy 的边界
 
@@ -213,11 +221,11 @@ EMU import row 状态当前支持：`pending_create`、`pending_update`、`creat
 
 | 表 | 主键/索引 | 主要字段 | 作用 |
 |---|---|---|---|
-| `sso_users` | `sso_user` PK | `password_hash`, `salt`, `email`, `role`, `gh_login`, `gh_scim_id`, `emu_status`, `copilot_seat_status`, `copilot_seat_last_operation`, `copilot_seat_last_error`, `copilot_seat_updated_at`, `created_at`, `updated_at` | 本地 SSO 用户和外部身份映射。 |
+| `sso_users` | `sso_user` PK | `password_hash`, `salt`, `email`, `role`, `gh_login`, `gh_scim_id`, `emu_status`, `copilot_seat_status`, `copilot_seat_pending_cancellation_date`, `copilot_seat_last_operation`, `copilot_seat_last_error`, `copilot_seat_updated_at`, `created_at`, `updated_at` | 本地 SSO 用户和外部身份映射。 |
 | `sso_runtime_settings` | `id=1` | `max_sso_users`, `user_prefix`, `email_domain`, `bulk_sync_concurrency`, SCIM delay/retry 字段、`version`, `updated_at` | 持久化 Console runtime settings 和乐观锁版本。 |
 | `sso_budget_cache` | `period_key` PK | `year`, `month`, `quantity`, `unit_type`, `raw_json`, `fetched_at` | AI Credits 月度用量缓存。 |
 | `sso_emu_import_plans` | `id` PK | `sso_user`, `status`, `created_at`, `updated_at`, `applied_at` | SCIM 反向导入 preview/apply 计划。 |
-| `sso_emu_import_plan_rows` | `(plan_id, row_index)` PK；`(plan_id,status,row_index)` 索引 | `sso_user`, `email`, `gh_login`, `gh_scim_id`, `emu_status`, `copilot_seat_status`, `status`, `detail`, `action` | 导入计划明细。 |
+| `sso_emu_import_plan_rows` | `(plan_id, row_index)` PK；`(plan_id,status,row_index)` 索引 | `sso_user`, `email`, `gh_login`, `gh_scim_id`, `emu_status`, `copilot_seat_status`, `copilot_seat_pending_cancellation_date`, `status`, `detail`, `action` | 导入计划明细。 |
 
 当前未配置：`gh_login`、`gh_scim_id` 没有数据库唯一索引；重复绑定主要依赖业务逻辑检查。
 

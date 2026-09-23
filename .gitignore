@@ -30,3 +30,4 @@ curl.http
 .claude/*
 !docs/codebase-overview.md
 !docs/repo-map.md
+insight.md

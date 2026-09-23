@@ -108,10 +108,9 @@ test('admin lists support adjustable pages, cross-page retry overrides and resto
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await refreshed;
   assert.equal(taskRequests, beforePause + 1, 'Manual refresh reads the current list once');
-  await page.getByRole('checkbox', { name: 'Select task-000', exact: true }).check();
-  await page.getByRole('button', { name: 'Select all 73 matches', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select current page', exact: true }).check();
   await page.getByRole('checkbox', { name: 'Select task-001', exact: true }).uncheck();
-  await page.getByText('72 matching records selected', { exact: true }).waitFor();
+  await page.getByText('24 record(s) selected', { exact: true }).waitFor();
   for (const label of ['Export selected', 'Export page', 'Export matches']) {
     const download = page.waitForEvent('download');
     if (label !== 'Export selected') await page.getByRole('button', { name: 'Export', exact: true }).click();
@@ -119,9 +118,7 @@ test('admin lists support adjustable pages, cross-page retry overrides and resto
     assert.equal((await download).suggestedFilename(), 'tasks.csv');
   }
   const selection = exports[0]?.selection;
-  assert.ok(selection && 'query' in selection && selection.query);
-  assert.equal(selection.query.status, 'failed');
-  assert.deepEqual(selection.excludedIds, ['task-001']);
+  assert.deepEqual(selection, { ids: tasks.slice(0, 25).filter((task) => task.id !== 'task-001').map((task) => task.id) });
   assert.equal(exports[1]?.scope, 'page');
   assert.equal(exports[2]?.scope, undefined);
   await page.getByRole('button', { name: 'Clear selection', exact: true }).click();
@@ -207,6 +204,7 @@ test('list actions remain visible before selection and after clearing on desktop
     ] as const) {
       await fixture.goto(route);
       const selected = page.getByRole('group', { name: 'Selection actions', exact: true });
+      assert.equal(await page.getByRole('button', { name: /^Select all \d+ matches$/ }).count(), 0);
       const reads = fixture.requests.length;
       for (const name of [...actions, 'Export selected', 'Clear selection']) {
         const button = selected.getByRole('button', { name, exact: true });
@@ -227,7 +225,7 @@ test('list actions remain visible before selection and after clearing on desktop
         const box = await button.boundingBox();
         assert.ok(box && box.x >= 0 && box.x + box.width <= width, `${route}: ${name} stays within the viewport`);
       }
-      assert.equal(await selected.getByRole('button', { name: /^Select all \d+ matches$/ }).isVisible(), true);
+      assert.equal(await selected.getByRole('button', { name: /^Select all \d+ matches$/ }).count(), 0);
       assert.equal(await selected.locator('[aria-haspopup]').count(), 0, 'No selected action is hidden inside a dropdown');
       if (route === 'users') assert.equal(await selected.getByRole('checkbox', { name: 'Assign seat when syncing GH login', exact: true }).isVisible(), true);
       assert.equal(await page.getByRole('dialog').count(), 0);
@@ -244,30 +242,29 @@ test('list actions remain visible before selection and after clearing on desktop
   fixture.assertHealthy();
 });
 
-test('permanent selection controls handle all matches, exclusions and empty search results', { timeout: 30_000 }, async (t) => {
+test('current-page selection handles individual deselection and empty search results', { timeout: 30_000 }, async (t) => {
   const fixture = await createConsoleFixture(t);
   const { page } = fixture;
   await fixture.goto('users');
   const controls = page.getByRole('group', { name: 'Selection actions', exact: true });
-  const selectAll = controls.getByRole('button', { name: 'Select all 2 matches', exact: true });
-  await selectAll.click();
-  await controls.getByText('2 matching records selected', { exact: true }).waitFor();
-  assert.equal(await selectAll.isVisible(), true, 'Select all is disabled rather than hidden after use');
-  assert.equal(await selectAll.isDisabled(), true);
+  const selectPage = page.getByRole('checkbox', { name: 'Select current page', exact: true });
+  await selectPage.check();
+  await controls.getByText('2 record(s) selected', { exact: true }).waitFor();
+  assert.equal(await selectPage.isChecked(), true);
   await page.getByRole('checkbox', { name: 'Select user-0', exact: true }).uncheck();
+  assert.equal(await selectPage.evaluate((element: HTMLInputElement) => element.indeterminate), true);
   await page.getByRole('checkbox', { name: 'Select user-1', exact: true }).uncheck();
-  await controls.getByText('0 matching records selected', { exact: true }).waitFor();
+  await controls.getByText('0 record(s) selected', { exact: true }).waitFor();
   assert.equal(await controls.getByRole('button', { name: 'Sync GH login', exact: true }).isDisabled(), true);
   assert.equal(await controls.getByRole('button', { name: 'Export selected', exact: true }).isDisabled(), true);
-  assert.equal(await controls.getByRole('button', { name: 'Clear selection', exact: true }).isEnabled(), true);
-  assert.equal(await selectAll.isEnabled(), true, 'Select all can restore excluded records');
-  await selectAll.click();
-  await controls.getByText('2 matching records selected', { exact: true }).waitFor();
+  assert.equal(await controls.getByRole('button', { name: 'Clear selection', exact: true }).isDisabled(), true);
+  await selectPage.check();
+  await controls.getByText('2 record(s) selected', { exact: true }).waitFor();
   await page.getByRole('textbox', { name: 'Search', exact: true }).fill('no-fixture-matches');
   await page.getByRole('button', { name: 'Search', exact: true }).click();
   await settle(page);
   await controls.getByText('0 record(s) selected', { exact: true }).waitFor();
-  assert.equal(await controls.getByRole('button', { name: 'Select all 0 matches', exact: true }).isDisabled(), true);
+  assert.equal(await controls.getByRole('button', { name: /^Select all \d+ matches$/ }).count(), 0);
   assert.equal(await controls.getByRole('button', { name: 'Delete SSO users', exact: true }).isDisabled(), true);
   assert.equal(await controls.getByRole('button', { name: 'Clear selection', exact: true }).isDisabled(), true);
   assert.equal(await page.getByRole('checkbox', { name: 'Select current page', exact: true }).isDisabled(), true);
@@ -276,7 +273,7 @@ test('permanent selection controls handle all matches, exclusions and empty sear
   fixture.assertHealthy();
 });
 
-test('SSO sync submits directly once with frozen matches, exclusions and inline sync options', { timeout: 45_000 }, async (t) => {
+test('SSO sync submits directly once with frozen selected records and inline sync options', { timeout: 45_000 }, async (t) => {
   const fixture = await createConsoleFixture(t);
   const { page, data } = fixture;
   const previewPath = `${paths.users}/operations/preview`;
@@ -284,8 +281,7 @@ test('SSO sync submits directly once with frozen matches, exclusions and inline 
   await fixture.goto('users?q=user-');
   const columns = await page.getByRole('columnheader').allTextContents();
   assert.equal(columns.includes('Last action'), false);
-  await page.getByRole('checkbox', { name: 'Select user-0', exact: true }).check();
-  await page.getByRole('button', { name: 'Select all 2 matches', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Select current page', exact: true }).check();
   await page.getByRole('checkbox', { name: 'Select user-1', exact: true }).uncheck();
   await page.getByRole('checkbox', { name: 'Assign seat when syncing GH login', exact: true }).check();
   const before = fixture.count(paths.users);
@@ -305,7 +301,7 @@ test('SSO sync submits directly once with frozen matches, exclusions and inline 
   assert.equal(await page.getByRole('dialog').count(), 0, 'Freezing targets never opens a preview dialog');
   assert.equal(await sync.isDisabled(), true, 'Actions stay disabled until execution is accepted');
   assert.deepEqual(fixture.requests.find((request) => request.path === previewPath)?.body, {
-    action: 'sync_emu', selection: { query: { page: 1, pageSize: 25, q: 'user-' }, excludedIds: ['user-1'] }, options: { assignCopilotSeat: true },
+    action: 'sync_emu', selection: { ids: ['user-0'] }, options: { assignCopilotSeat: true },
   });
   assert.deepEqual(fixture.requests.find((request) => request.path === executePath)?.body, { assignCopilotSeat: true, overrides: [] });
   assert.deepEqual(data.operation?.items.map((item) => item.id), ['user-0']);
@@ -348,7 +344,7 @@ test('destructive actions show only a concise confirmation and cancellation neve
   const fixture = await createConsoleFixture(t);
   const { page } = fixture;
   for (const [route, base, id, label, action, warning] of [
-    ['users', paths.users, 'user-0', 'Remove seat', 'remove_copilot', /interrupt Copilot access/],
+    ['users', paths.users, 'user-0', 'Remove seat', 'remove_copilot', /not immediate loss of access/],
     ['users', paths.users, 'user-0', 'Suspend GH login', 'suspend_emu', /interrupts their GitHub access/],
     ['users', paths.users, 'user-0', 'Delete GH login', 'delete_emu', /Local SSO users and Proxy records remain/],
     ['users', paths.users, 'user-0', 'Delete SSO users', 'delete_sso', /associated Proxy accounts\/request statistics/],

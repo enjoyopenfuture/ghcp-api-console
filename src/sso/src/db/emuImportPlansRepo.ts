@@ -27,6 +27,7 @@ interface RowRecord {
   gh_scim_id?: string;
   emu_status?: ImportEmuUserRow['emuStatus'];
   copilot_seat_status?: ImportEmuUserRow['copilotSeatStatus'];
+  copilot_seat_pending_cancellation_date?: string | null;
   status: ImportEmuUserStatus;
   detail: string;
   action?: EmuImportAction;
@@ -40,9 +41,9 @@ export function createEmuImportPlanRecord(input: { id: string; ssoUser?: string;
       .run(input.id, input.ssoUser, 'planned', now, now);
     const insertRow = getDb().prepare(`
       INSERT INTO sso_emu_import_plan_rows (
-        plan_id, row_index, sso_user, email, gh_login, gh_scim_id, emu_status, copilot_seat_status,
+        plan_id, row_index, sso_user, email, gh_login, gh_scim_id, emu_status, copilot_seat_status, copilot_seat_pending_cancellation_date,
         status, detail, action, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     input.rows.forEach((row, index) => {
       insertRow.run(
@@ -54,6 +55,7 @@ export function createEmuImportPlanRecord(input: { id: string; ssoUser?: string;
         row.ghScimId,
         row.emuStatus,
         row.copilotSeatStatus,
+        row.copilotSeatPendingCancellationDate,
         row.status,
         row.detail,
         row.action,
@@ -100,7 +102,7 @@ export function updateEmuImportPlanRow(planId: string, row: EmuImportPlanRowReco
   getDb()
     .prepare(`
       UPDATE sso_emu_import_plan_rows
-      SET email = ?, gh_login = ?, gh_scim_id = ?, emu_status = ?, copilot_seat_status = ?,
+      SET email = ?, gh_login = ?, gh_scim_id = ?, emu_status = ?, copilot_seat_status = ?, copilot_seat_pending_cancellation_date = ?,
           status = ?, detail = ?, action = ?, updated_at = ?
       WHERE plan_id = ? AND row_index = ?
     `)
@@ -110,6 +112,7 @@ export function updateEmuImportPlanRow(planId: string, row: EmuImportPlanRowReco
       row.ghScimId,
       row.emuStatus,
       row.copilotSeatStatus,
+      row.copilotSeatPendingCancellationDate,
       row.status,
       row.detail,
       row.action,
@@ -177,6 +180,7 @@ function toImportRow(row: RowRecord): ImportEmuUserRow {
     ghScimId: row.gh_scim_id,
     emuStatus: row.emu_status,
     copilotSeatStatus: row.copilot_seat_status,
+    copilotSeatPendingCancellationDate: row.copilot_seat_pending_cancellation_date ?? undefined,
     status: row.status,
     detail: row.detail,
   };

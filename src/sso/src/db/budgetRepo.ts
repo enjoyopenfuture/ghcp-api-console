@@ -47,7 +47,7 @@ export function saveAiCreditsUsagePeriod(input: AiCreditsUsageCacheRecord): AiCr
 }
 
 export function countAssignedCopilotSeats(): number {
-  return (getDb().prepare("SELECT COUNT(*) AS count FROM sso_users WHERE copilot_seat_status = 'assigned'").get() as { count: number }).count;
+  return (getDb().prepare("SELECT COUNT(*) AS count FROM sso_users WHERE copilot_seat_status IN ('assigned', 'pending_cancellation')").get() as { count: number }).count;
 }
 
 function mapRow(row: AiCreditsUsageRow): AiCreditsUsageCacheRecord {

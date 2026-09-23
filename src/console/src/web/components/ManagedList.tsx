@@ -299,7 +299,6 @@ export function ManagedList<T, R extends PageResponse<T> = PageResponse<T>>(prop
       <div className={`flex flex-wrap items-center gap-2 border-t border-slate-200 px-4 py-3 ${count ? 'bg-blue-50' : ''}`} role="group" aria-label="Selection actions">
         <strong className="mr-2 text-sm tabular-nums" aria-live="polite">{count} {allMatching ? 'matching records' : 'record(s)'} selected</strong>
         {batchActions.map((action) => <Button key={action.id} size="sm" variant={action.danger ? 'dangerOutline' : 'secondary'} disabled={actionDisabled || !count} onClick={() => runAction(action)}>{operations.busy && operations.busyAction === action.id ? <RefreshCw aria-hidden="true" size={14} className="animate-spin" /> : null}{action.label}</Button>)}
-        <Button size="sm" variant="secondary" disabled={loading || !total || allMatching && !selected.size} onClick={() => { setSelected(new Set()); setAllMatching(true); }}>Select all {total} matches</Button>
         <Button size="sm" variant="secondary" disabled={exporting || loading || !count} onClick={() => void exportRows('selected')}>{exporting ? 'Exporting...' : 'Export selected'}</Button>
         <Tooltip content="Clear selection"><Button size="icon" variant="secondary" aria-label="Clear selection" disabled={!allMatching && !selected.size} onClick={clear}><X size={14} /></Button></Tooltip>
         {props.selectionOptions ? <div className="basis-full">{props.selectionOptions}</div> : null}

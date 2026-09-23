@@ -50,9 +50,9 @@ usersApiRouter.get('/users/summary', (_req, res) => res.json(summarizeUsers()));
 usersApiRouter.route('/users/export').get(exportUsers()).post(exportUsers());
 function exportUsers() {
   return csvExport('sso-users',
-    ['ssoUser', 'email', 'role', 'ghLogin', 'emuStatus', 'copilotSeatStatus', 'updatedAt'],
+    ['ssoUser', 'email', 'role', 'ghLogin', 'emuStatus', 'copilotSeatStatus', 'copilotSeatPendingCancellationDate', 'updatedAt'],
     async (query) => listUsers(query),
-    (user) => [user.ssoUser, user.email, user.role, user.ghLogin, user.emuStatus, user.copilotSeatStatus, user.updatedAt],
+    (user) => [user.ssoUser, user.email, user.role, user.ghLogin, user.emuStatus, user.copilotSeatStatus, user.copilotSeatPendingCancellationDate, user.updatedAt],
     (_query, consume) => withSqliteReadSnapshot(getDb(), (database) => consume(async (query) => listUsers(query, database))),
   );
 }

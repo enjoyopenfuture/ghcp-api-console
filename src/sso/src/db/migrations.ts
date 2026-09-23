@@ -12,6 +12,7 @@ export function runMigrations(db: Database.Database): void {
       gh_scim_id TEXT,
       emu_status TEXT NOT NULL DEFAULT 'not_synced',
       copilot_seat_status TEXT NOT NULL DEFAULT 'unknown',
+      copilot_seat_pending_cancellation_date TEXT,
       copilot_seat_last_operation TEXT,
       copilot_seat_last_error TEXT,
       copilot_seat_updated_at TEXT,
@@ -60,6 +61,7 @@ export function runMigrations(db: Database.Database): void {
       gh_scim_id TEXT,
       emu_status TEXT,
       copilot_seat_status TEXT,
+      copilot_seat_pending_cancellation_date TEXT,
       status TEXT NOT NULL,
       detail TEXT NOT NULL,
       action TEXT,
@@ -79,13 +81,21 @@ export function runMigrations(db: Database.Database): void {
     ) VALUES (1, NULL, 'user', 'customsso.com', 3, 250, 3, 1000, 1, ?)
   `).run(new Date().toISOString());
   addColumnIfMissing(db, 'sso_emu_import_plan_rows', 'copilot_seat_status', 'TEXT');
+  addColumnIfMissing(db, 'sso_users', 'copilot_seat_pending_cancellation_date', 'TEXT');
+  if (addColumnIfMissing(db, 'sso_emu_import_plan_rows', 'copilot_seat_pending_cancellation_date', 'TEXT')) {
+    db.prepare(`
+      UPDATE sso_emu_import_plan_rows SET status = 'conflict', detail = ?
+      WHERE status IN ('pending_create', 'pending_update')
+    `).run('Seat synchronization changed. Preview again before applying this import.');
+  }
   dropLegacyPasswordColumn(db);
 }
 
-function addColumnIfMissing(db: Database.Database, table: string, column: string, definition: string): void {
+function addColumnIfMissing(db: Database.Database, table: string, column: string, definition: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-  if (columns.some((item) => item.name === column)) return;
+  if (columns.some((item) => item.name === column)) return false;
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  return true;
 }
 
 function dropLegacyPasswordColumn(db: Database.Database): void {

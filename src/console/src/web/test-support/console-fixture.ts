@@ -119,8 +119,10 @@ export async function createConsoleFixture(t: TestContext) {
   const paged = <T extends object>(req: Request, rows: T[]) => {
     const q = String(req.query.q ?? '').toLowerCase();
     const statuses = String(req.query.status ?? '').split(',').filter(Boolean);
+    const seatStatuses = String(req.query.seatStatus ?? '').split(',').filter(Boolean);
     const filtered = rows.filter((row) => (!q || JSON.stringify(row).toLowerCase().includes(q))
-      && (!statuses.length || !('status' in row) || statuses.includes(String(row.status))));
+      && (!statuses.length || !('status' in row) || statuses.includes(String(row.status)))
+      && (!seatStatuses.length || !('copilotSeatStatus' in row) || seatStatuses.includes(String(row.copilotSeatStatus))));
     const pageSize = Number(req.query.pageSize ?? 25);
     const page = Math.min(Number(req.query.page ?? 1), Math.max(1, Math.ceil(filtered.length / pageSize)));
     return { items: filtered.slice((page - 1) * pageSize, page * pageSize), total: filtered.length, page, pageSize };

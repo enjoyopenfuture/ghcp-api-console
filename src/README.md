@@ -308,7 +308,7 @@ Console 自身接口：
 | --- | --- |
 | `CopilotOauthStatus` | `valid`、`expired`、`missing`、`refreshing`、`failed` |
 | `EmuStatus` | `active`、`suspended`、`deleted`、`not_synced` |
-| `CopilotSeatStatus` | `unknown`、`assigned`、`unassigned`、`assign_failed`、`remove_failed` |
+| `CopilotSeatStatus` | `unknown`、`assigned`、`pending_cancellation`、`unassigned`、`assign_failed`、`remove_failed`；企业直接席位待取消时附带 `copilotSeatPendingCancellationDate`，页面显示 `cancell at <日期>`。 |
 | `LoginTaskStatus` | `pending`、`running`、`cancelling`、`success`、`failed`、`cancelled` |
 | `SsoType` | `azure`、`custom` |
 
