@@ -18,8 +18,8 @@ test('default credential resolution is internal, read-only and refuses changed p
   const { countUsers } = await import('../db/usersRepo.js');
   const { requireInternalToken } = await import('../auth/internalAuth.js');
   const { loginCredentialsRouter } = await import('./loginCredentials.js');
-  createSsoUser({ ssoUser: 'default-user' });
-  createSsoUser({ ssoUser: 'changed-user', password: 'fixture-custom-password' });
+  await createSsoUser({ ssoUser: 'default-user' });
+  await createSsoUser({ ssoUser: 'changed-user', password: 'fixture-custom-password' });
   const app = express();
   app.use(express.json());
   app.use('/internal', requireInternalToken, loginCredentialsRouter);

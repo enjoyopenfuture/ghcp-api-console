@@ -38,7 +38,7 @@ test('marks excess GH imports as failed without rolling back available slots', a
     });
     const plan = await createEmuImportPlan();
 
-    applyEmuImportPlan(plan.planId);
+    await applyEmuImportPlan(plan.planId);
 
     const rows = listEmuImportPlanRows(plan.planId).items;
     assert.equal(rows.find((row) => row.ssoUser === 'alice')?.status, 'created');

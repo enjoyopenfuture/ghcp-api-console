@@ -41,7 +41,7 @@
     "validate:health": "bash scripts/validate-health.sh"
   },
   "dependencies": {
-    "@authenio/samlify-node-xmllint": "^2.0.0",
+    "@xmldom/xmldom": "^0.8.15",
     "better-sqlite3": "^12.5.0",
     "cookie-session": "^2.1.0",
     "dotenv": "^16.4.7",

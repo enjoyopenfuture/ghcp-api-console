@@ -60,7 +60,7 @@ test('imports direct seat snapshots, dates and date-only updates without changin
     assert.equal(getUser('carol'), undefined, 'Preview does not create a user');
 
     seats[1]!.pending_cancellation_date = '2026-11-17';
-    applyEmuImportPlan(plan.planId);
+    await applyEmuImportPlan(plan.planId);
 
     assert.equal(getUser('bob')?.copilotSeatStatus, 'assigned');
     assert.equal(getUser('bob')?.passwordHash, 'keep-hash');
@@ -71,15 +71,15 @@ test('imports direct seat snapshots, dates and date-only updates without changin
     const second = await createEmuImportPlan();
     assert.equal(second.summary.pendingUpdate, 1, 'A date-only change must not be skipped');
     assert.equal(listEmuImportPlanRows(second.planId, { status: 'pending_update', pageSize: 1 }).items[0]?.copilotSeatPendingCancellationDate, '2026-11-17');
-    applyEmuImportPlan(second.planId);
+    await applyEmuImportPlan(second.planId);
     assert.equal(getUser('carol')?.copilotSeatPendingCancellationDate, '2026-11-17');
-    assert.equal(applyEmuImportPlan(second.planId).summary.updated, 1, 'Apply is reentrant');
+    assert.equal((await applyEmuImportPlan(second.planId)).summary.updated, 1, 'Apply is reentrant');
     assert.equal((await createEmuImportPlan()).summary.skipped, 5);
 
     recordCopilotSeatError('carol', 'remove', 'Previous readback failed');
     const clearErrorPlan = await createEmuImportPlan();
     assert.equal(clearErrorPlan.summary.pendingUpdate, 1);
-    applyEmuImportPlan(clearErrorPlan.planId);
+    await applyEmuImportPlan(clearErrorPlan.planId);
     assert.equal(Boolean(getUser('carol')?.copilotSeatLastError), false);
 
     seats[1]!.pending_cancellation_date = null;

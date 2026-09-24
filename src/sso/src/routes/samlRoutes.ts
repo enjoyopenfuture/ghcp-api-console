@@ -46,7 +46,7 @@ samlRouter.get('/login', (_req, res) => {
 samlRouter.post('/login', async (req, res) => {
   const { username, password } = req.body as { username?: string; password?: string };
   const user = username ? getUser(username) : undefined;
-  if (!user || !verifyPassword(password ?? '', user.passwordHash, user.salt)) {
+  if (!user || !(await verifyPassword(password ?? '', user.passwordHash, user.salt))) {
     res.status(401).type('html').send(loginHtml('Invalid username or password.'));
     return;
   }
