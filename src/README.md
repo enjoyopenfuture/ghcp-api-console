@@ -195,6 +195,7 @@ curl http://localhost:8002/healthz
 | `POST` | `/responses` | 转发 OpenAI Responses 形状请求；合法入站 `x-initiator` 优先透传，否则末条 `*_call_output` 判为 `agent`。 |
 | `POST` | `/v1/messages` | 转发 Anthropic Messages 形状请求；合法入站 `x-initiator` 优先透传，否则根据 `tool_result`、compact 和自动续轮判定请求意图。 |
 | `POST` | `/v1/messages/count_tokens` | 仅请求解析为 Claude Code 优化模式时提供；必要时本地估算 token。 |
+| `POST` | `/copilot/chat/attachments` | 供客户端自行上传图片的透传接口：用当前 identity 的 OAuth token 转发到 Copilot 附件上传地址，原样返回结果；`PROXY_IMAGE_UPLOAD_MODE=off` 时关闭（404）。 |
 
 管理/服务间接口：
 

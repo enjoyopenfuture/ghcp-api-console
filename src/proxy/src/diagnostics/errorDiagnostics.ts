@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 import {
   redactSensitiveValue,
@@ -16,6 +16,9 @@ import { Logger } from '../logger.js';
 import { ErrorDiagnosticsStore } from './errorDiagnosticsStore.js';
 
 const RESPONSE_CAPTURE_LIMIT = 20 * 1024 * 1024;
+const BASE64_ELISION_THRESHOLD = 4096;
+const DATA_URL_HEADER_LIMIT = 256;
+const BASE64_DATA_URL_HEADER = /^data:([^,;]*)[^,]*;base64,/i;
 const logger = new Logger('error-diagnostics');
 
 export const errorDiagnosticsStore = new ErrorDiagnosticsStore({
@@ -93,7 +96,7 @@ export function createErrorDiagnosticContext(
       method: req.method,
       url: req.originalUrl,
       rawHeaders: [...req.rawHeaders],
-      body: req.rawBody ? Buffer.from(req.rawBody) : undefined,
+      body: req.rawBody,
     },
   };
 }
@@ -207,7 +210,7 @@ function requestDto(
       byteLength: body.byteLength,
       complete: true,
       truncated: false,
-    }, contentType, contentEncoding),
+    }, contentType, contentEncoding, { elideBase64: true }),
   };
 }
 
@@ -225,12 +228,17 @@ function bodyDto(
   body: CapturedResponseBody,
   contentType?: string,
   contentEncoding?: string,
+  options: { elideBase64?: boolean } = {},
 ): ProxyErrorDiagnosticBodyDto {
+  const elidable = options.elideBase64 === true && isBase64ElisionCandidate(body, contentType, contentEncoding);
   if (!config.errorDiagnosticsRedact) {
     const textual = isTextContentType(contentType) && !isEncodedContent(contentEncoding);
+    const data = body.buffer.toString(textual ? 'utf8' : 'base64');
+    const elided = elidable ? elideBase64Json(data) : undefined;
+    if (elided !== undefined) return jsonBodyDto(body, elided);
     return {
       encoding: textual ? 'utf8' : 'base64',
-      data: body.buffer.toString(textual ? 'utf8' : 'base64'),
+      data,
       byteLength: body.byteLength,
       capturedByteLength: body.buffer.byteLength,
       truncated: body.truncated,
@@ -244,18 +252,22 @@ function bodyDto(
     return unavailableBody(body, 'Body unavailable because non-JSON content cannot be safely redacted.');
   }
   try {
-    const redacted = JSON.stringify(redactSensitiveValue(JSON.parse(body.buffer.toString('utf8'))));
-    return {
-      encoding: 'utf8',
-      data: redacted,
-      byteLength: body.byteLength,
-      capturedByteLength: Buffer.byteLength(redacted),
-      truncated: false,
-      complete: true,
-    };
+    const redacted = redactSensitiveValue(JSON.parse(body.buffer.toString('utf8')));
+    return jsonBodyDto(body, JSON.stringify(elidable ? elideBase64Payloads(redacted) : redacted));
   } catch {
     return unavailableBody(body, 'Body unavailable because JSON content could not be safely parsed for redaction.');
   }
+}
+
+function jsonBodyDto(body: CapturedResponseBody, data: string): ProxyErrorDiagnosticBodyDto {
+  return {
+    encoding: 'utf8',
+    data,
+    byteLength: body.byteLength,
+    capturedByteLength: Buffer.byteLength(data),
+    truncated: false,
+    complete: true,
+  };
 }
 
 function unavailableBody(body: CapturedResponseBody, unavailableReason: string): ProxyErrorDiagnosticBodyDto {
@@ -267,6 +279,68 @@ function unavailableBody(body: CapturedResponseBody, unavailableReason: string):
     complete: body.complete,
     unavailableReason,
   };
+}
+
+// Inline images can make request bodies tens of MiB; keep only a fingerprint of each large base64 payload.
+function isBase64ElisionCandidate(body: CapturedResponseBody, contentType?: string, contentEncoding?: string): boolean {
+  return body.complete
+    && !body.truncated
+    && !isEncodedContent(contentEncoding)
+    && isJsonContentType(contentType)
+    && body.buffer.includes('base64');
+}
+
+function elideBase64Json(text: string): string | undefined {
+  try {
+    const elision = { count: 0 };
+    const value = elideBase64Payloads(JSON.parse(text), elision);
+    return elision.count > 0 ? JSON.stringify(value) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Mutates a freshly parsed tree in place; returns the replacement so a top-level string can be elided too.
+function elideBase64Payloads(value: unknown, elision = { count: 0 }): unknown {
+  if (typeof value === 'string') {
+    const marker = elidedDataUrl(value);
+    if (marker === undefined) return value;
+    elision.count++;
+    return marker;
+  }
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) value[index] = elideBase64Payloads(value[index], elision);
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) record[key] = elideBase64Payloads(record[key], elision);
+  const marker = elidedBase64Source(record);
+  if (marker === undefined) return record;
+  record.data = marker;
+  elision.count++;
+  return record;
+}
+
+function elidedDataUrl(value: string): string | undefined {
+  if (value.length <= BASE64_ELISION_THRESHOLD) return undefined;
+  const header = BASE64_DATA_URL_HEADER.exec(value.slice(0, DATA_URL_HEADER_LIMIT));
+  if (!header) return undefined;
+  const mediaType = header[1].trim() || 'unknown';
+  return `[elided base64 data URL: ${mediaType}, ${describeBase64(value.slice(header[0].length))}]`;
+}
+
+function elidedBase64Source(source: Record<string, unknown>): string | undefined {
+  // Own-property check: redaction may have turned a "__proto__" key into the prototype.
+  if (source.type !== 'base64' || !Object.hasOwn(source, 'data')) return undefined;
+  const { data, media_type: mediaType } = source;
+  if (typeof data !== 'string' || data.length <= BASE64_ELISION_THRESHOLD) return undefined;
+  return `[elided base64: ${typeof mediaType === 'string' && mediaType ? mediaType : 'unknown'}, ${describeBase64(data)}]`;
+}
+
+function describeBase64(payload: string): string {
+  const bytes = Buffer.from(payload, 'base64');
+  return `${bytes.byteLength} bytes, sha256=${createHash('sha256').update(bytes).digest('hex').slice(0, 16)}`;
 }
 
 function diagnosticHeaders(headers: HttpHeaderPair[]): HttpHeaderPair[] {

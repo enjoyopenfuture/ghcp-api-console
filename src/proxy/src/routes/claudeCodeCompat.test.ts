@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Request } from 'express';
-import { prepareClaudeCodeMessagesRequest, preprocessClaudeCodeMessagesBody } from './claudeCodeCompat.js';
+import { estimateInputTokens, prepareClaudeCodeMessagesRequest, preprocessClaudeCodeMessagesBody } from './claudeCodeCompat.js';
 
 test('keeps text outside a tool result that contains a tool reference', () => {
   const prepared = preprocessClaudeCodeMessagesBody({
@@ -83,6 +83,29 @@ test('lets a valid incoming initiator override optimized compact inference', () 
 
   assert.equal(prepared.forwardOptions.initiator, 'user');
   assert.equal(prepared.forwardOptions.interactionType, 'conversation-other');
+});
+
+test('estimates image blocks at a fixed token cost instead of their base64 length', () => {
+  const text = { type: 'text', text: 'Describe these screenshots.' };
+  const withoutImages = estimateInputTokens({ model: 'claude-sonnet-4.5', messages: [{ role: 'user', content: [text] }] });
+  const withImages = estimateInputTokens({
+    model: 'claude-sonnet-4.5',
+    messages: [{
+      role: 'user',
+      content: [
+        text,
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(4_000_000) } },
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_read',
+          content: [{ type: 'image', source: { type: 'url', url: 'https://github.com/github-copilot/chat/attachments/a' } }],
+        },
+      ],
+    }],
+  });
+
+  assert.ok(withImages >= withoutImages + 2 * 1600, `estimate ${withImages} should include both images`);
+  assert.ok(withImages < withoutImages + 2 * 1600 + 50, `estimate ${withImages} should not count base64 bytes`);
 });
 
 function request(initiator?: string): Request {

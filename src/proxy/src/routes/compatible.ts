@@ -1,6 +1,7 @@
 import { TextDecoder } from 'node:util';
-import { Router, type NextFunction, type Request, type Response } from 'express';
+import express, { Router, type NextFunction, type Request, type Response } from 'express';
 import { apiError } from '@ghcp/shared';
+import { config } from '../config.js';
 import { recordRequestStat as persistRequestStat } from '../db/requestStatsRepo.js';
 import { Logger } from '../logger.js';
 import {
@@ -27,6 +28,12 @@ import {
   type PreparedCopilotRequest,
 } from '../copilot/copilotClient.js';
 import {
+  evictImageAttachments,
+  postChatAttachment,
+  prepareImageAttachments,
+  sanitizeAttachmentName,
+} from '../copilot/imageAttachments.js';
+import {
   estimateInputTokens,
   isTokenCountFallbackStatus,
   prepareClaudeCodeMessagesRequest,
@@ -34,10 +41,16 @@ import {
   webSearchUnsupportedMessage,
 } from './claudeCodeCompat.js';
 import { resolveClaudeCodeOptimized } from './claudeCodeMode.js';
+import { containsImageContent } from './imageContent.js';
 import { resolveRequestIntent } from './requestIntent.js';
 
 export const compatibleRouter = Router();
 const requestStatsLogger = new Logger('request-stats');
+const attachmentLogger = new Logger('attachment-upload');
+const ATTACHMENT_UPLOAD_LIMIT_BYTES = 20 * 1024 * 1024;
+const MIME_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
+// Copilot answers these when a request carries an attachment URL it cannot use (expired, unknown, invalid).
+const ATTACHMENT_REJECTION_STATUSES = new Set([400, 404, 422]);
 
 interface UsageStats {
   inputTokens?: number;
@@ -101,7 +114,63 @@ compatibleRouter.post('/v1/messages', async (req, res) => {
   await handleForward(req, res, '/v1/messages');
 });
 
+compatibleRouter.post(
+  '/copilot/chat/attachments',
+  skipWhenImageUploadDisabled,
+  express.raw({ type: 'application/octet-stream', limit: ATTACHMENT_UPLOAD_LIMIT_BYTES }),
+  handleAttachmentUpload,
+);
+
 compatibleRouter.use('/v1/files', handleFilesApiUnsupported);
+
+function skipWhenImageUploadDisabled(_req: Request, _res: Response, next: NextFunction): void {
+  // Falls through to the app's 404 handler, as if the route did not exist.
+  if (config.imageUploadMode === 'off') {
+    next('route');
+    return;
+  }
+  next();
+}
+
+async function handleAttachmentUpload(req: Request, res: Response): Promise<void> {
+  const identity = requireIdentity(req, res);
+  if (!identity) return;
+  if (!Buffer.isBuffer(req.body)) {
+    sendOpenAiLikeError(req, res, 415, 'Content-Type must be application/octet-stream.', 'invalid_request_error');
+    return;
+  }
+  const data = req.body;
+  if (data.byteLength === 0) {
+    sendOpenAiLikeError(req, res, 400, 'Request body must contain the attachment bytes.', 'invalid_request_error');
+    return;
+  }
+  const contentType = req.query.content_type;
+  if (typeof contentType !== 'string' || !MIME_TYPE.test(contentType)) {
+    sendOpenAiLikeError(req, res, 400, 'Query parameter "content_type" must be a MIME type such as image/png.', 'invalid_request_error');
+    return;
+  }
+  const name = sanitizeAttachmentName(typeof req.query.name === 'string' ? req.query.name : '');
+  const logFields = { identity, bytes: data.byteLength, contentType };
+  try {
+    const copilot = await copilotAuthManager.getAuth(identity);
+    // The OAuth token is deliberately not invalidated on 401: the upload host may differ from the Copilot API.
+    const upstream = await postChatAttachment(copilot, { data, name, contentType });
+    const payload = Buffer.from(await upstream.arrayBuffer());
+    attachmentLogger.info('attachment-upload-proxied', 'Proxied a Copilot chat attachment upload', {
+      ...logFields,
+      status: upstream.status,
+    });
+    res.status(upstream.status);
+    res.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/json');
+    res.send(payload);
+  } catch (err) {
+    attachmentLogger.warn('attachment-upload-failed', 'Failed to proxy a Copilot chat attachment upload', {
+      ...logFields,
+      error: errorMessage(err),
+    });
+    if (!res.headersSent) sendCompatibleError(req, res, err);
+  }
+}
 
 function handleFilesApiUnsupported(req: Request, res: Response, next: NextFunction): void {
   const claudeCodeOptimized = requireClaudeCodeOptimized(req, res);
@@ -224,6 +293,7 @@ function prepareForward(
       body,
       forwardOptions: {
         initiator: resolveRequestIntent(path, body, req.get('x-initiator')).initiator,
+        visionRequest: containsImageContent(path, body),
       },
     };
   }
@@ -251,7 +321,8 @@ async function forwardAuthenticated(
     await invalidateUnauthorizedAuth(identity, copilot.accessToken, err);
     throw err;
   }
-  const request = prepareCopilotRequest(copilot, path, body, options);
+  const attachments = await prepareImageAttachments(copilot, path, body);
+  const request = prepareCopilotRequest(copilot, path, attachments.body, options);
   let response: globalThis.Response;
   try {
     response = await executePreparedCopilotRequest(request);
@@ -261,6 +332,10 @@ async function forwardAuthenticated(
   }
   if (response.status === 401) {
     await copilotAuthManager.invalidate(identity, copilot.accessToken);
+  }
+  if (attachments.attachmentKeys.length > 0 && ATTACHMENT_REJECTION_STATUSES.has(response.status)) {
+    // No automatic retry: evicting lets the next request re-upload instead of reusing a bad URL.
+    evictImageAttachments(identity, attachments.attachmentKeys);
   }
   return { response, request };
 }
@@ -669,6 +744,7 @@ function sendUnsupportedCompatiblePath(req: Request, res: Response, claudeCodeOp
 function supportedPathsMessage(claudeCodeOptimized: boolean): string {
   const paths = ['GET /v1/models', 'POST /chat/completions', 'POST /v1/messages', 'POST /responses'];
   if (claudeCodeOptimized) paths.splice(3, 0, 'POST /v1/messages/count_tokens');
+  if (config.imageUploadMode !== 'off') paths.push('POST /copilot/chat/attachments');
   return `Supported paths: ${paths.join(', ')}.`;
 }
 

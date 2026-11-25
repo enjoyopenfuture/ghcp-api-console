@@ -150,6 +150,8 @@ cp .env.example .env
 | `COPILOT_API_BASE_URL` | Copilot API 地址；GitHub.com 默认 `https://api.githubcopilot.com`，GHE.com 为 `https://copilot-api.<subdomain>.ghe.com`。 |
 | `GITHUB_API_BASE_URL` | SSO 调用 GitHub Copilot seat 和 AI Credits API 的根地址，默认 `https://api.github.com`；GHE.com 为 `https://api.<subdomain>.ghe.com`（`SCIM_BASE_URL` 同理）。 |
 | `GITHUB_API_VERSION` | Copilot 请求的 `X-GitHub-Api-Version`，默认 `2026-06-01`。 |
+| `PROXY_IMAGE_UPLOAD_MODE` | Proxy 把内联 base64 图片上传为 Copilot 附件 URL 的策略：默认 `always`，可选 `auto`（上游 body 超过端点上限时才上传）或 `off`；详见 [Proxy 图片上传](./src/proxy/README.md#图片上传)。 |
+| `PROXY_MAX_REQUEST_BODY_MB` | Proxy 入站 JSON body 上限（MiB），默认 `64`；客户端仍以内联 base64 发图，该值决定单个请求能携带多少、多大的图片。 |
 | `LOGIN_SSO_URL` | Login 自动化使用的默认 SSO 登录 URL；任务的 `ssoUrl` 可覆盖。Provider 由任务的 `ssoType` 决定，不通过环境变量配置。 |
 | `AUTH_HEADLESS` | Login Playwright 是否无头运行，默认 `true`。 |
 | `LOG_LEVEL` | 所有服务的结构化日志等级：`debug`、`info`、`warn`、`error`。 |
@@ -328,6 +330,30 @@ Claude Code 可以通过 settings 文件接入本地 proxy，例如 `~/.claude/s
 **注意：** Copilot API的Claude系列模型默认是包含1M的上下文窗口的。但在Claude Code侧默认是使用200K上下文窗口，这个是CC在客户端默认的配置。如果需要更多的上下文窗口，需要在CC配置文件的模型名称后面增加`[1m]`的后缀，如上面的示例中的模型名称。
 
 如果使用项目内 `.claude/settings.local.json`，不要提交包含 `ANTHROPIC_AUTH_TOKEN` 的文件。
+
+## 图片支持
+
+### 上游限制
+
+Copilot 网关在模型路由之前按端点限制请求体大小，与模型无关；内联 base64 会让图片体积膨胀约 4/3：
+
+| 端点 | 请求体上限 | 内联时单图约 | 上传为 URL 后单图上限 | 典型模型 |
+| --- | --- | --- | --- | --- |
+| `/chat/completions` | 5 MiB | 3.75 MiB | 约 15 MiB（base64 20M） | Gemini（只能走该端点）、GPT-4.x |
+| `/responses` | 32 MiB | 24 MiB | 约 15 MiB（base64 20M） | GPT-5 及以上、codex |
+| `/v1/messages` | 32 MiB | 7.5 MiB | 3,750,000 字节（约 3.6 MiB） | Claude |
+
+先把图片上传为 Copilot 附件、请求里只带 URL 时，github copilot api 网关逐张取回附件，只限制单图，且限制单个请求的图片数量为10张。
+
+### 当前实现
+
+- Proxy 转发前用该 identity 自己的 OAuth token 把内联 base64 图片上传到 Copilot 附件 API，再在原请求格式内替换为 URL。上传地址由 `GITHUB_BASE_URL` 推导：GitHub.com 为 `uploads.github.com`，GHE.com 为 `uploads.<subdomain>.ghe.com`。
+- 按端点改写，覆盖该端点上的所有模型：chat 的 `image_url`（补上 `media_type`）、responses 的 `input_image`、messages 的 `image` block（含 `tool_result` 中的图片）。请求含图片时发送 `Copilot-Vision-Request: true`。
+- 超过 URL 单图上限的图片保持内联，所以 `/v1/messages` 上 3.6–7.5 MiB 的图片仍以内联方式发送。Proxy 不压缩、不缩放图片，超过上表上限的图片仍会被上游拒绝。
+- 同一张图按 identity 缓存 1 小时，只上传一次；上传失败自动回退为内联发送，不影响请求。
+- 客户端仍以 base64 发图给 Proxy：入站上限为 `PROXY_MAX_REQUEST_BODY_MB`（默认 64 MiB），上传策略为 `PROXY_IMAGE_UPLOAD_MODE`（默认 `always`，可选 `auto` / `off`）。自行上传图片的客户端可使用透传接口 `POST /copilot/chat/attachments`。
+
+已实测：Gemini 单图 15 MiB、GPT 在 `/responses` 一次发送 3 × 10 MiB、Claude 在 `/v1/messages` 和 `/chat/completions` 上均正常。详细说明见 [Proxy 图片上传](./src/proxy/README.md#图片上传)。
 
 ## 本地开发
 

@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { parseGithubBaseUrl } from '@ghcp/shared';
+import { parseGithubBaseUrl, type GithubBaseUrl } from '@ghcp/shared';
 
 export interface ProxyConfig {
   port: number;
@@ -29,9 +29,16 @@ export interface ProxyConfig {
   errorDiagnosticsShared: boolean;
   errorDiagnosticsInstanceId: string;
   copilotApiBaseUrl: string;
+  /** Derived from GITHUB_BASE_URL, without a query string; callers append `?name=...&content_type=...`. */
+  copilotAttachmentUploadUrl: string;
+  imageUploadMode: 'always' | 'auto' | 'off';
+  /** Inbound JSON body limit, also the cap for raw request bytes kept for diagnostics. */
+  maxRequestBodyBytes: number;
   opencodeUserAgent: string;
   githubApiVersion: string;
 }
+
+const githubBaseUrl = parseGithubBaseUrl(process.env.GITHUB_BASE_URL);
 
 export const config: ProxyConfig = {
   port: readPort(process.env.PORT, 3000),
@@ -51,7 +58,7 @@ export const config: ProxyConfig = {
   ssoBaseUrl: process.env.SSO_BASE_URL ?? 'http://localhost:7001',
   loginBaseUrl: process.env.LOGIN_BASE_URL ?? 'http://localhost:7003',
   // GHE.com logins carry no visible shortcode suffix, so ENTERPRISE_SHORTCODE is ignored there.
-  enterpriseShortcode: parseGithubBaseUrl(process.env.GITHUB_BASE_URL).isGheCom
+  enterpriseShortcode: githubBaseUrl.isGheCom
     ? ''
     : readOptionalString(process.env.ENTERPRISE_SHORTCODE) ?? 'octo',
   requestStatsPerAccountLimit: readPositiveInteger(process.env.REQUEST_STATS_PER_ACCOUNT_LIMIT, 2),
@@ -65,6 +72,9 @@ export const config: ProxyConfig = {
     ?? readOptionalString(process.env.HOSTNAME)
     ?? 'proxy',
   copilotApiBaseUrl: readOptionalString(process.env.COPILOT_API_BASE_URL) ?? 'https://api.githubcopilot.com',
+  copilotAttachmentUploadUrl: attachmentUploadUrl(githubBaseUrl),
+  imageUploadMode: readImageUploadMode(process.env.PROXY_IMAGE_UPLOAD_MODE),
+  maxRequestBodyBytes: readPositiveInteger(process.env.PROXY_MAX_REQUEST_BODY_MB, 64) * 1024 * 1024,
   opencodeUserAgent: readOptionalString(process.env.OPENCODE_USER_AGENT)
     ?? `opencode/${readOptionalString(process.env.OPENCODE_VERSION) ?? '1.0.0'}`,
   githubApiVersion: readOptionalString(process.env.GITHUB_API_VERSION) ?? '2026-06-01',
@@ -106,6 +116,16 @@ function readMysqlSslMode(value: string | undefined): ProxyConfig['mysqlSslMode'
   const normalized = value?.trim().toLowerCase() || 'disabled';
   if (normalized === 'disabled' || normalized === 'required' || normalized === 'verify-ca') return normalized;
   throw new Error(`Invalid MYSQL_SSL_MODE "${value}". Expected "disabled", "required", or "verify-ca".`);
+}
+
+function readImageUploadMode(value: string | undefined): ProxyConfig['imageUploadMode'] {
+  const normalized = value?.trim().toLowerCase() || 'always';
+  if (normalized === 'always' || normalized === 'auto' || normalized === 'off') return normalized;
+  throw new Error(`Invalid PROXY_IMAGE_UPLOAD_MODE "${value}". Expected "always", "auto", or "off".`);
+}
+
+function attachmentUploadUrl(githubBaseUrl: GithubBaseUrl): string {
+  return `https://uploads.${githubBaseUrl.isGheCom ? githubBaseUrl.host : 'github.com'}/copilot/chat/attachments`;
 }
 
 function readOptionalString(value: string | undefined): string | undefined {

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
@@ -142,6 +142,61 @@ test('redacts sensitive JSON and headers in the readable log', async () => {
     assert.equal(stored.redacted, true);
   });
 });
+
+for (const redacted of [false, true]) {
+  test(`elides large base64 images from inbound and upstream request bodies (redacted=${redacted})`, async () => {
+    await withDiagnosticsStore(redacted, async () => {
+      const imageBytes = Buffer.from(Array.from({ length: 6 * 1024 }, (_, index) => index % 251));
+      const imageBase64 = imageBytes.toString('base64');
+      const imageDigest = createHash('sha256').update(imageBytes).digest('hex').slice(0, 16);
+      const smallDataUrl = `data:image/gif;base64,${Buffer.from('tiny image').toString('base64')}`;
+      const rawBody = Buffer.from(JSON.stringify({
+        model: 'claude-sonnet',
+        api_token: 'inbound-secret',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'describe this image' },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${imageBase64}` } },
+            { type: 'image_url', image_url: { url: smallDataUrl } },
+          ],
+        }],
+      }));
+      const context = createErrorDiagnosticContext(fakeRequest(rawBody), 'alice', '/chat/completions', 'claude-sonnet');
+      const prepared = prepareCopilotRequest(
+        { identity: 'alice', accessToken: 'upstream-value', api: 'https://api.githubcopilot.com' },
+        '/v1/messages',
+        {
+          model: 'claude-sonnet',
+          max_tokens: 64,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: 'describe this image' },
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imageBase64 } },
+            ],
+          }],
+        },
+      );
+
+      const diagnosticId = await recordHttpFailure(context, prepared, new Response(null, { status: 400 }));
+      const stored = await errorDiagnosticsStore.get(diagnosticId);
+
+      assert.ok(stored);
+      assert.equal(stored.content.includes(imageBase64), false);
+      const fingerprint = `image/png, ${imageBytes.byteLength} bytes, sha256=${imageDigest}`;
+      assert.ok(stored.content.includes(`"url": "[elided base64 data URL: ${fingerprint}]"`));
+      assert.ok(stored.content.includes(`"data": "[elided base64: ${fingerprint}]"`));
+      assert.ok(stored.content.includes(`"url": "${smallDataUrl}"`));
+      assert.match(stored.content, /"text": "describe this image"/);
+      assert.match(stored.content, /"media_type": "image\/png"/);
+      assert.equal(stored.content.includes('inbound-secret'), !redacted);
+      assert.ok(stored.content.includes(`observedBytes=${rawBody.byteLength}`));
+      assert.equal(stored.inboundRequestBodyBytes, rawBody.byteLength);
+      assert.equal(stored.upstreamRequestBodyBytes, Buffer.byteLength(prepared.body ?? ''));
+    });
+  });
+}
 
 test('admin API lists, reads, downloads, clears, and reports disabled diagnostics', async () => {
   await withDiagnosticsStore(false, async () => {

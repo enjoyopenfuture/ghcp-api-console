@@ -7,6 +7,7 @@
 Proxy 位于客户端与 GitHub Copilot 后端之间，负责：
 
 - 对外提供 Copilot 兼容 API：`/chat/completions`、`/v1/messages`、`/responses`、`/v1/models`。
+- 转发前把内联 base64 图片上传为 Copilot 附件并改用 URL，绕过网关按端点的请求体上限；另提供透传上传接口 `/copilot/chat/attachments`。
 - 用本地 API Key 保护公共代理接口，用内部 Token 保护管理/服务间接口。
 - 按用户身份（默认请求头 `X-User-Identity`）维护账号、Token 状态和请求统计。
 - 分别连接 SSO 服务与 Login 服务：未知身份会触发 SSO 用户确保、EMU 同步，并由 Proxy 创建 Login 任务；手动重新授权 Copilot OAuth 也会创建 Login 任务。
@@ -24,6 +25,7 @@ Proxy 位于客户端与 GitHub Copilot 后端之间，负责：
 | Copilot OAuth 管理 | `src/accounts/copilotOauthTokenImport.ts`、`src/db/accountsRepo.ts` | 支持 `/models` 验证后 CSV 导入、Login 服务写入、失败标记和手动重新授权排队。 |
 | 模型与路径校验 | `src/copilot/copilotClient.ts` | 使用 OAuth bearer 读取 `/models`，判断模型是否适用于当前 API 路径；缓存按 identity 隔离 1 小时，失败时可短期使用旧缓存。 |
 | 请求转发 | `src/routes/compatible.ts` | 使用 OpenCode headers 转发 JSON/SSE 响应；上游 401 时清除 OAuth token 并要求重新授权。 |
+| 图片上传 | `src/routes/imageContent.ts`、`src/copilot/imageAttachments.ts` | 按端点识别内联 base64 图片，上传到 Copilot 附件 API 后替换为 URL；按 identity 缓存，失败时回退内联。 |
 | 请求统计 | `src/db/requestStatsRepo.ts` | 记录路径、模型、成功/失败、失败原因、输入/输出/cache token；按账号保留最近 N 条。 |
 | 错误诊断 | `src/diagnostics/*` | 保存原始入站请求、实际转发请求和上游错误响应；使用有界轮转的人类可读日志，可选递归脱敏。 |
 | Claude Code 优化 | `src/routes/claudeCodeMode.ts`、`src/routes/claudeCodeCompat.ts`、`src/routes/anthropicModelProfiles.ts` | 可选开启，对 `/v1/messages*` 做 Anthropic/Claude Code 兼容处理、模型规范化和 profile 驱动的 thinking/effort 修正；支持请求头覆盖默认模式。 |
@@ -114,6 +116,8 @@ Proxy 通过 `dotenv/config` 读取环境变量。未设置时使用 `src/config
 | `OPENCODE_VERSION` | `1.0.0` / `1.18.4` | 否 | 生成 `User-Agent: opencode/<version>`。 |
 | `OPENCODE_USER_AGENT` | 未设置 / 未设置 | 否 | 显式覆盖完整 User-Agent；非空时优先于 `OPENCODE_VERSION`。 |
 | `GITHUB_API_VERSION` | `2026-06-01` / 同 | 否 | `X-GitHub-Api-Version` 请求头。 |
+| `PROXY_IMAGE_UPLOAD_MODE` | `always` / `always` | 否 | 内联 base64 图片上传为 Copilot 附件 URL 的策略：`always`、`auto` 或 `off`；非法值启动失败。详见[图片上传](#图片上传)。 |
+| `PROXY_MAX_REQUEST_BODY_MB` | `64` / `64` | 否 | Proxy 自身的入站 JSON body 上限（MiB），必须为正整数；原先固定为 20 MB。客户端仍以内联 base64 发图，因此它决定单个请求能携带多少、多大的图片；仅用于保护 Proxy 内存，超限返回 JSON 413。 |
 
 ### `.env` 与 runtime Settings
 
@@ -174,17 +178,111 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 | `POST` | `/chat/completions` | API Key + identity | JSON 对象，必须含 `model: string`；其余字段保持上游 Chat Completions 形状 | 直接返回 Copilot 上游状态、`content-type` 和 body；支持 SSE。 |
 | `POST` | `/responses` | API Key + identity | JSON 对象，必须含 `model: string`；其余字段保持上游 Responses 形状 | 同上。 |
 | `POST` | `/v1/messages` | API Key + identity | JSON 对象，必须含 `model: string`；其余字段保持 Anthropic Messages 形状 | 同上；优化模式会做 Claude Code 兼容预处理。 |
-| `POST` | `/v1/messages/count_tokens` | API Key + identity | 仅当前请求解析为优化模式时可用；JSON 对象，必须含 `model: string` | 优先转发到上游；若上游返回 404/405/501，则本地估算并返回 `{ input_tokens: number }`。 |
+| `POST` | `/v1/messages/count_tokens` | API Key + identity | 仅当前请求解析为优化模式时可用；JSON 对象，必须含 `model: string` | 优先转发到上游；若上游返回 404/405/413/501，则本地估算并返回 `{ input_tokens: number }`。 |
+| `POST` | `/copilot/chat/attachments?name=<name>&content_type=<mime>` | API Key + identity | 原始图片字节，`Content-Type: application/octet-stream`，最大 20 MiB（超限返回 JSON 413） | 用当前 identity 的 OAuth token 转发到 Copilot 附件上传地址，原样返回上游状态和 body，例如 `201 {"url": ...}`；网络错误或超时返回 `502 api_error`。不记请求统计；`PROXY_IMAGE_UPLOAD_MODE=off` 时返回 404。其他错误状态见[图片上传](#图片上传)。 |
 | 任意 | `/v1/files*` | API Key + identity | 当前未提供 Files API | 优化模式下返回 Anthropic 风格 `not_supported`；非优化模式走统一 404。 |
 
 边界说明：
 
-- Proxy 不在 OpenAI/Anthropic/Responses 之间转换请求体；调用方必须发送目标路径对应的 body；非常简单的透传模式。
+- Proxy 不在 OpenAI/Anthropic/Responses 之间转换请求体；调用方必须发送目标路径对应的 body；非常简单的透传模式。除 Claude Code 优化模式的预处理外，唯一的改写是在原格式内把内联 base64 图片替换为 Copilot 附件 URL，见[图片上传](#图片上传)。
 - 转发前会检查 `body.model` 是否存在、模型是否支持当前路径；不支持时返回 400。
-- 上游 401 会清除当前 identity 的 OAuth token 并标记为 `expired`；管理员需要重新授权或导入新 token。403 作为 seat/组织策略错误透传，不清除 token。
+- 上游 401 会清除当前 identity 的 OAuth token 并标记为 `expired`；管理员需要重新授权或导入新 token。403 作为 seat/组织策略错误透传，不清除 token。附件上传（自动上传或透传接口）返回的 401 不清除 token。
 - 未知 identity 会触发初始化并返回 202：`{ error: { code: "account_initializing", ... } }`。
 - 不支持的路径返回 404，并列出当前支持路径。
 - 所有 POST 转发都会向 Copilot 发送 `x-initiator`。若入站 `x-initiator` 去除首尾空白并忽略大小写后为 `user` 或 `agent`，Proxy 会优先采用并规范为小写；其他值不会透传，而是回退到请求内容判断。无合法 header 时，Anthropic Messages 的末条 `tool_result`、compact/summary 和自动 `Please continue.`，Chat Completions 的末条 `role:"tool"`，以及 Responses 的末条 `*_call_output` 输入会判为 `agent`，其余请求判为 `user`。该规则同时适用于直接转发和 Claude Code 优化模式。
+
+#### 图片上传
+
+Copilot 网关按端点限制请求体字节数，与模型无关：
+
+| 端点 | 请求体上限 | 影响 |
+| --- | --- | --- |
+| `/chat/completions` | 5 MiB（5,242,880 字节） | Gemini 只能走该端点，单张内联 base64 图片的原图只能到约 3.75 MiB。 |
+| `/responses` | 32 MiB（33,554,432 字节） | 整个请求（含全部内联图片）合计受限。 |
+| `/v1/messages` | 32 MiB（33,554,432 字节） | 同上。 |
+
+Proxy 参照 VS Code Copilot Chat：转发前把每张内联 base64 图片上传到 Copilot 附件 API，再用返回的 URL 替换请求中的图片。改用 URL 后，网关逐个拉取附件，只限制单图（原图约 ≤ 15 MiB），不限制单个请求的总量；每张图片在请求体中只占几百字节。上传使用当前 identity 自己的 OpenCode OAuth token，即调用 Copilot API 的同一凭据，不需要新凭据：
+
+```http
+POST https://uploads.github.com/copilot/chat/attachments?name=<name>&content_type=<mime>
+Authorization: Bearer <OAuth token>
+Content-Type: application/octet-stream
+
+<图片二进制字节>
+```
+
+成功时返回 `201 {"url":"https://github.com/github-copilot/chat/attachments/<uuid>"}`。
+
+处理方式只由请求路径决定，因此覆盖所有模型：走 chat 的 Gemini / GPT-4.x / Claude、走 responses 的 GPT-5+ / codex、走 messages 的 Claude，以及这些端点上的其他模型。
+
+| 端点 | 识别的内联图片 | 改写为 |
+| --- | --- | --- |
+| `/chat/completions` | `messages[].content[]` 中 `type:"image_url"`，且 `image_url.url`（或字符串形式的 `image_url`）为 `data:image/*;base64,...` | `image_url: { url, media_type, ...其他字段（如 detail） }`；Copilot 要求 URL 图片带 `media_type`。 |
+| `/responses` | `input[]` 项的 `content[]` 和 `output[]`（如 `function_call_output` 的列表输出）中 `type:"input_image"`，且 `image_url` 为 data URL | `image_url: "<url>"`，保留 `detail`。 |
+| `/v1/messages` | `messages[].content[]` 及 `tool_result.content[]` 中 `type:"image"`、`source.type:"base64"` 的 block | `source: { type: "url", url }`，保留 `cache_control`。 |
+
+已经是 http(s) URL 的图片、`file_id`、非图片 data URL（如 PDF），以及 `/v1/messages/count_tokens` 的 body 都原样透传。
+
+**Vision header**：只要请求包含图片（内联或 URL），三个端点都会发送 `Copilot-Vision-Request: true`，判断规则与 OpenCode 相同：chat 看是否有 `image_url` part；responses 看 `content` 或 `output` 中是否有 `input_image`；messages 看是否有 `image` block（含 `tool_result` 内）。此前只有 Claude Code 优化模式会发送。
+
+**上传模式**（`PROXY_IMAGE_UPLOAD_MODE`）：
+
+| 值 | 行为 |
+| --- | --- |
+| `always`（默认） | 上传所有符合条件的内联图片，与 VS Code 一致；每张新图片增加一次上传往返。 |
+| `auto` | 先替换缓存中已有的图片；序列化后的上游 body 仍超过端点上限（chat 5 MiB，responses/messages 32 MiB）时，才上传其余内联图片。 |
+| `off` | 不上传，透传上传接口返回 404；仍会发送 vision header。 |
+
+**大小限制**：
+
+- 入站上限 `PROXY_MAX_REQUEST_BODY_MB`（默认 64 MiB）：客户端仍以内联 base64 把图片发给 Proxy，该值决定单个请求能携带多少、多大的图片。上传后上游 body 很小，Copilot 只限制单图（原图约 15 MiB）；原先固定的 20 MB 连一张接近上限的图片都放不下（15 MiB 原图 ≈ 20 MiB base64）。该上限只用于保护 Proxy 内存，单个请求的内存峰值约为 body 的 3 倍；超限返回 JSON 413。
+- 单图：解码后超过 15 MiB − 4 KiB 的图片不上传，保持内联；`/responses` 内联仍可携带约 24 MiB，chat 会被上游 413。上传文件名是确定性的短名 `img-<sha256 前 16 位 hex>.<ext>`，因为文件名等元数据也计入单图 20 MiB 额度。
+- `/v1/messages` 的单图上限更低：网关只解析 base64 不超过 5,000,000 字节（原图 ≤ 3,750,000 字节）的附件 URL，超过时返回纯文本 `413 Request Entity Too Large`（实测 3,750,000 字节通过、3,760,000 字节 413；同一张图走 `/chat/completions` 不受此限制）。而内联 base64 在 `/v1/messages` 上单图可到约 7.5 MiB，所以该端点只上传原图 ≤ 3,750,000 字节的图片，更大的保持内联；即使同一张图已在其他端点上传过，也不会复用其 URL。
+- 透传上传接口：body 最大 20 MiB，超限返回 JSON 413。
+
+**缓存与多实例**：
+
+- 进程内缓存按 identity 隔离，用某个用户 token 上传的附件不会给其他用户复用。
+- key 为媒体类型 + base64 的 sha256；TTL 为上传后 1 小时，LRU 最多 5000 条；同一张图片的并发上传会合并为一次。
+- 缓存只在单个 Proxy 实例内。多实例时每个实例可能各上传同一张图片一次，确定性文件名保证结果一致。
+- 使用了附件 URL 的请求收到上游 400/404/422 时，会淘汰这些缓存条目，失效 URL 在下一次请求时自愈；Proxy 不自动重试。
+
+**失败回退**：
+
+- 上传失败不会让客户端请求失败：该图片按原样内联发送。
+- 上传返回 401/403/404、网络错误或超时（60 秒）：该 identity 暂停上传 5 分钟。
+- 返回 400/413/415/422：该图片 1 小时内不再重试。
+- 返回 429/5xx：不缓存失败结果。
+- 单个请求最多 4 个并发上传。
+- 上传失败只写一行 WARN 日志，不生成错误诊断记录，也不记入请求统计；不会使 identity 的 OAuth token 失效。
+
+**上传地址与 GHE.com**：上传地址由 `GITHUB_BASE_URL` 自动推导，无需配置：`https://github.com`（及其他非 `*.ghe.com` host）为 `https://uploads.github.com/copilot/chat/attachments`；`https://<subdomain>.ghe.com` 为 `https://uploads.<subdomain>.ghe.com/copilot/chat/attachments`。GHE.com 地址已实测：上传返回 `201`，URL 形如 `https://<subdomain>.ghe.com/github-copilot/chat/attachments/<uuid>`，并可在请求中正常使用。上传失败只会让图片回退为内联 base64。Proxy 需要能出网访问该地址（GitHub.com 为 `uploads.github.com:443`）。
+
+**透传上传接口**：供已经自行按 VS Code 方式上传图片的客户端使用。
+
+```bash
+curl "http://localhost:3000/copilot/chat/attachments?name=screenshot.png&content_type=image/png" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "X-User-Identity: alice" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @screenshot.png
+# 201 {"url":"https://github.com/github-copilot/chat/attachments/<uuid>"}
+```
+
+- 鉴权与其他公共接口相同（API Key + identity header）；body 为原始图片字节。
+- Proxy 用当前 identity 的 OAuth token 转发到上传地址，`name` 清洗为只含 `[A-Za-z0-9._-]` 的字符。
+- 不记入请求统计。`PROXY_IMAGE_UPLOAD_MODE` 不为 `off` 时，404 响应的支持路径提示中会列出该路径。
+- 客户端随后在 `/chat/completions` 中使用该 URL 时，必须自己带上 `media_type`，例如 `{"type":"image_url","image_url":{"url":"<url>","media_type":"image/png"}}`。
+
+| 情况 | 返回 |
+| --- | --- |
+| `PROXY_IMAGE_UPLOAD_MODE=off` | 统一的不支持路径 `404`。 |
+| `Content-Type` 不是 `application/octet-stream` | `415 invalid_request_error`（OpenAI 形状）。 |
+| body 为空；`content_type` 缺失或格式不对（应形如 `image/png`） | `400`。 |
+| body 超过 20 MiB | JSON `413 request_too_large`。 |
+| 账号未就绪 | 与其他接口相同：`202` / `409` / `503`。 |
+| 访问上传地址时网络错误或超时 | `502 api_error`。 |
+| 其他 | 原样返回上传地址的状态和 body，包括 4xx（成功为 `201 {"url": ...}`）；上传地址返回 401 不会使 identity 的 OAuth token 失效。 |
 
 #### Claude Code 优化模式
 
@@ -196,8 +294,8 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 - **mid-conversation system**：对多数模型，历史中间位置的 `role:"system"` 会改成 `role:"user"`，并给首个 text block 加 `[Claude Code injected]\n` 前缀；仅 profile 标记可接受且位置合法的模型会保留原 system message。
 - **Headers / beta**：转发时使用 OpenCode 风格 header：OAuth `Authorization: Bearer`、`User-Agent: opencode/<version>`、`X-GitHub-Api-Version: 2026-06-01`、`Openai-Intent: conversation-edits` 和 `x-initiator`。`anthropic-version` 默认 `2023-06-01`；`anthropic-beta` 只保留允许的 token，并按请求内容派生 `interleaved-thinking-2025-05-14`、`context-management-2025-06-27`、`advanced-tool-use-2025-11-20`、`token-counting-2024-11-01`；会丢弃 `claude-code-*`、陈旧 prompt-caching 和已知 Copilot 不接受的全局 beta。
 - **请求意图**：沿用公共 POST 转发的 `x-initiator` 优先级；合法入站值优先于内容推断。无合法 header 时，普通用户请求发送 `user`，compact、`tool_result` 续轮和自动 continue 发送 `agent`；compact 无论 initiator 是否由 header 覆盖，都会额外发送 `x-interaction-type: conversation-other`。
-- **视觉与不支持能力**：请求中出现 image content block 时设置 `Copilot-Vision-Request: true`。`/v1/files*` 返回 Anthropic 风格 `not_supported`；`web_search` / `web_search_*` server tool 会在本地前置拒绝，提示改用支持的模型/账号或 MCP 搜索工具。
-- **token count**：`/v1/messages/count_tokens` 复用同一套 body 预处理和前置错误检查，优先转发 Copilot；若上游返回 404/405/501，则用本地 JSON 长度估算 `{ input_tokens }`。
+- **视觉与不支持能力**：请求中出现 image content block（含 `tool_result` 内）时设置 `Copilot-Vision-Request: true`；该规则现已适用于所有端点和非优化模式，见[图片上传](#图片上传)。`/v1/files*` 返回 Anthropic 风格 `not_supported`；`web_search` / `web_search_*` server tool 会在本地前置拒绝，提示改用支持的模型/账号或 MCP 搜索工具。
+- **token count**：`/v1/messages/count_tokens` 复用同一套 body 预处理和前置错误检查，但不做图片上传改写，优先转发 Copilot；若上游返回 404/405/413/501，则用本地 JSON 长度估算 `{ input_tokens }`，其中每个 image block 固定按 1600 tokens 计、不计 base64 长度（旧估算会严重高估，可能过早触发 compact）。
 - **SSE**：`/v1/messages` 的 SSE 基本透传，保留 Copilot 扩展字段；仅过滤 Copilot 末尾的 OpenAI 风格 `[DONE]` 事件，避免 Claude Code 按 Anthropic SSE 解析时报错。
 
 当请求解析为非优化模式时，Proxy 不会因为请求来自 Claude Code 就拒绝；`POST /v1/messages` 仍会按 Anthropic Messages 形状直接转发，但不会做 Claude Code body 预处理，也不会开放 `/v1/messages/count_tokens`。
@@ -210,6 +308,7 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 | API Key 不匹配 | `401 invalid_api_key`。 |
 | 缺 identity header，且 `IDENTITY_HEADER_REQUIRED=true` | `400 missing_identity_header`。 |
 | `X-Claude-Code-Optimized` 不是合法布尔值 | `400 invalid_request_error`。 |
+| 请求 body 超过 `PROXY_MAX_REQUEST_BODY_MB`，或不是合法 JSON | 返回 JSON 而不再是 Express 的 HTML 错误页（`/api`、`/internal` 不变）。超限为 `413`：`/v1/messages*` 返回 `{"type":"error","error":{"type":"request_too_large","message":"Request body exceeds the proxy limit of <N> MiB."}}`，其他路径返回 `{"error":{"message":"...","type":"invalid_request_error","code":"request_too_large"}}`。非法 JSON 为 `400`，消息为 `Request body is not valid JSON.`，按路径使用同样两种形状，类型为 `invalid_request_error`。 |
 | 请求 body 不是 JSON 对象 | `400 invalid_request_error`。 |
 | 请求 body 缺少字符串类型 `model` | `400 invalid_request_error`。 |
 | `model` 不存在，或不支持当前路径 | `400 invalid_request_error`。 |
@@ -224,8 +323,9 @@ X-Internal-Token: <INTERNAL_API_TOKEN>
 - 上游 HTTP 5xx、fetch/network/abort 和响应流读取失败使用 `ERROR`。
 - 摘要包含 identity、path、model、状态码、上游 URL 和 body 字节数，不输出完整正文。
 - 诊断文件记录原始入站 method/URL/raw headers/raw body、转换后实际发送的 URL/headers/body，以及上游 status/headers/body 或异常 stack。
-- `/v1/messages/count_tokens` 遇到 404/405/501 后即使成功使用本地估算，也会记录该次上游失败。
-- 响应诊断最多捕获 20 MB 并标记截断；入站请求沿用 Express 的 20 MB JSON 上限，压缩请求保存解压前原始字节。
+- `/v1/messages/count_tokens` 遇到 404/405/413/501 后即使成功使用本地估算，也会记录该次上游失败。
+- 响应诊断最多捕获 20 MB 并标记截断；入站原始 body 最多捕获 `PROXY_MAX_REQUEST_BODY_MB`（默认 64 MiB），压缩请求保存解压前原始字节，`application/octet-stream` 上传请求不捕获 body。
+- 入站和实际上游**请求** body（未编码的 JSON）中超过 4096 字符的 base64 内容会替换为摘要，与是否脱敏无关：data URL 记为 `[elided base64 data URL: <mime>, <bytes> bytes, sha256=<16 hex>]`，`{type:"base64", data}` 的 `data` 记为 `[elided base64: <media_type>, <bytes> bytes, sha256=<16 hex>]`。响应 body 不变；代价是诊断中的 curl 无法再重放原图。
 
 ### 5.4 管理接口 `/api/*`
 
@@ -329,7 +429,7 @@ SQLite 是默认的单 Pod 模式，不能把同一个 SQLite 文件以 RWX 方�
 - 上游 status、headers、完整或截断的 body；
 - transport/stream 异常的 name、message、stack 和 cause。
 
-普通 JSON、text、SSE 等 body 直接以 UTF-8 明文保存，可解析 JSON 会缩进格式化。只有压缩或二进制 body 才标记编码并使用 base64。管理页面直接预览同一文本记录，下载文件与磁盘 `.log` 内容一致。
+普通 JSON、text、SSE 等 body 直接以 UTF-8 明文保存，可解析 JSON 会缩进格式化；请求 body 中的大段 base64 数据（如图片）会替换为摘要（见 5.3 节）。只有压缩或二进制 body 才标记编码并使用 base64。管理页面直接预览同一文本记录，下载文件与磁盘 `.log` 内容一致。
 
 ### 6.3 主要领域对象
 
@@ -364,12 +464,14 @@ src/proxy/
     │   ├── compatible.ts        # 公共 Copilot 兼容 API、转发、统计
     │   ├── claudeCodeCompat.ts  # Claude Code 请求预处理与错误适配
     │   ├── anthropicModelProfiles.ts # Claude 模型规范化与 profile
+    │   ├── imageContent.ts      # 各端点内联图片识别、URL 替换与 vision 判断
     │   ├── adminApi.ts          # /api 管理接口
     │   └── internalApi.ts       # /internal 服务间接口
     ├── copilot/
     │   ├── copilotAuth.ts       # Copilot OAuth auth context
     │   ├── copilotAuthManager.ts # 账号初始化、OAuth 状态与重新授权
-    │   └── copilotClient.ts     # Copilot 模型列表、路径校验、转发 headers
+    │   ├── copilotClient.ts     # Copilot 模型列表、路径校验、转发 headers
+    │   └── imageAttachments.ts  # 附件上传、按 identity 的缓存与失败退避
     ├── clients/                 # SSO/Login 服务 JSON client，响应丢失时按 attempt 到 Login 核对任务是否已接受
     ├── accounts/                # Copilot OAuth token 验证与 CSV 导入
     ├── diagnostics/             # 错误现场构造、人类可读格式、轮转文本 store 与测试

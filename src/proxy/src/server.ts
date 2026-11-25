@@ -15,12 +15,15 @@ import { internalApiRouter } from './routes/internalApi.js';
 import { accountOperationsRouter } from './routes/operationsApi.js';
 
 const requestLogger = new Logger('request');
+const MIB = 1024 * 1024;
+// Mirrors the mount paths of the management routers, whose own error handlers answer body errors.
+const MANAGEMENT_PATH = /^\/(?:api|internal)(?:\/|$)/i;
 
 export function buildApp(): express.Express {
   const app = express();
   app.use(logRequestHeaders);
   app.use(captureRawRequestBody);
-  app.use(express.json({ limit: '20mb' }));
+  app.use(express.json({ limit: config.maxRequestBodyBytes }));
   app.get('/healthz', (_req, res) => {
     res.json({ status: 'ok', service: 'proxy' });
   });
@@ -54,21 +57,93 @@ export function buildApp(): express.Express {
     }
     res.status(404).json({ error: { message, type: 'invalid_request_error' } });
   });
+  app.use(handleRequestBodyError);
   return app;
 }
 
 export function captureRawRequestBody(req: Request, _res: Response, next: NextFunction): void {
-  const chunks: Buffer[] = [];
+  // Upload bodies are parsed by a route-level raw parser; an early 'data' listener would start the
+  // stream flowing before that parser attaches and double the memory held per request.
+  if (req.is('application/octet-stream')) {
+    next();
+    return;
+  }
+  let chunks: Buffer[] | undefined = [];
   let byteLength = 0;
   req.on('data', (chunk: Buffer | Uint8Array | string) => {
+    if (!chunks) return;
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    chunks.push(Buffer.from(buffer));
     byteLength += buffer.byteLength;
+    // body-parser drains oversized bodies before answering 413, so stop buffering past the limit.
+    if (byteLength > config.maxRequestBodyBytes) {
+      chunks = undefined;
+      return;
+    }
+    chunks.push(buffer);
   });
   req.on('end', () => {
-    req.rawBody = Buffer.concat(chunks, byteLength);
+    if (chunks) req.rawBody = Buffer.concat(chunks, byteLength);
   });
   next();
+}
+
+function handleRequestBodyError(err: unknown, req: Request, res: Response, next: NextFunction): void {
+  const bodyError = readRequestBodyError(err);
+  if (!bodyError || res.headersSent || MANAGEMENT_PATH.test(req.path)) {
+    next(err);
+    return;
+  }
+  const message = requestBodyErrorMessage(bodyError);
+  const tooLarge = bodyError.status === 413;
+  requestLogger.warn('request-body-rejected', 'Rejected inbound request body', {
+    method: req.method,
+    path: req.path,
+    status: bodyError.status,
+    type: bodyError.type,
+    message,
+  });
+  if (req.path.startsWith('/v1/messages')) {
+    res.status(bodyError.status).json({
+      type: 'error',
+      error: { type: tooLarge ? 'request_too_large' : 'invalid_request_error', message },
+    });
+    return;
+  }
+  res.status(bodyError.status).json({
+    error: { message, type: 'invalid_request_error', ...(tooLarge ? { code: 'request_too_large' } : {}) },
+  });
+}
+
+interface RequestBodyError {
+  type: string;
+  status: number;
+  message: string;
+  limit?: number;
+}
+
+/** Recognizes body-parser style client errors such as entity.too.large or entity.parse.failed. */
+function readRequestBodyError(err: unknown): RequestBodyError | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const { type, status, statusCode, message, limit } = err as Record<string, unknown>;
+  const code = typeof status === 'number' ? status : statusCode;
+  if (typeof type !== 'string' || typeof code !== 'number' || !Number.isInteger(code) || code < 400 || code > 499) {
+    return undefined;
+  }
+  return {
+    type,
+    status: code,
+    message: typeof message === 'string' ? message : 'Invalid request body.',
+    limit: typeof limit === 'number' ? limit : undefined,
+  };
+}
+
+function requestBodyErrorMessage(error: RequestBodyError): string {
+  if (error.status === 413) {
+    const limitMib = Number(((error.limit ?? config.maxRequestBodyBytes) / MIB).toFixed(2));
+    return `Request body exceeds the proxy limit of ${limitMib} MiB.`;
+  }
+  if (error.type === 'entity.parse.failed') return 'Request body is not valid JSON.';
+  return error.message;
 }
 
 function logRequestHeaders(req: Request, _res: Response, next: NextFunction): void {
@@ -97,6 +172,7 @@ function shouldRedactHeader(name: string): boolean {
 function supportedPathsMessage(claudeCodeOptimized: boolean): string {
   const paths = ['GET /v1/models', 'POST /chat/completions', 'POST /v1/messages', 'POST /responses'];
   if (claudeCodeOptimized) paths.splice(3, 0, 'POST /v1/messages/count_tokens');
+  if (config.imageUploadMode !== 'off') paths.push('POST /copilot/chat/attachments');
   return `Supported paths: ${paths.join(', ')}.`;
 }
 

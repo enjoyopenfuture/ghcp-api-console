@@ -16,7 +16,7 @@ flowchart LR
         console["console:7004"]
     end
 
-    gh["github.com / api.github.com / api.githubcopilot.com"]
+    gh["github.com / api.github.com / api.githubcopilot.com / uploads.github.com"]
     admin["Admin PC"]
     client["API Client"]
 
@@ -56,7 +56,7 @@ flowchart LR
 - `sso:7001` 的访问者是**执行登录的浏览器**：login 容器内的 Playwright（必需），以及管理员自己的浏览器（否则管理员无法在自己 PC 上登录 GitHub，只能 ssh 到服务器借 login 服务登录）。
 - `SSO_PUBLIC_BASE_URL` 虽然名字带 "PUBLIC"，实际要求只是能被上述浏览器访问。
 - 只有 `proxy:3000` 的暴露范围由“API Client 在哪里”决定；`login:7003`、`console:7004` 只需内网/VPN 可达。
-- 所有容器都需要**出网**访问 `github.com`、`api.github.com`、`api.githubcopilot.com`。
+- 所有容器都需要**出网**访问 `github.com`、`api.github.com`、`api.githubcopilot.com`。proxy 还需访问图片附件上传地址 `uploads.github.com:443`；GHE.com 默认为 `uploads.<subdomain>.ghe.com:443`（由 `GITHUB_BASE_URL` 自动推导）。
 
 ## 2. EMU SSO URL 的选择
 
@@ -101,11 +101,11 @@ flowchart LR
 | 入站 | Client 网段 | `3000` | 允许 |
 | 入站 | 管理员网段 / VPN | `7001`、`7004` | 允许 |
 | 入站 | 其他 | `3000`、`7001`、`7003`、`7004` | 拒绝 |
-| 出站 | server | `github.com:443`、`api.github.com:443`、`api.githubcopilot.com:443` | 允许 |
+| 出站 | server | `github.com:443`、`api.github.com:443`、`api.githubcopilot.com:443`、`uploads.github.com:443` | 允许 |
 
 ## 4. 部署前网络检查清单
 
-- [ ] 服务器可出网访问 `github.com`、`api.github.com`、`api.githubcopilot.com`（443）。
+- [ ] 服务器可出网访问 `github.com`、`api.github.com`、`api.githubcopilot.com`、`uploads.github.com`（443）。
 - [ ] 在 login 容器内能访问 EMU 配置的 SSO URL：
   `docker compose exec login node -e "fetch('http://10.0.0.1:7001/healthz').then(r=>console.log(r.status))"`
 - [ ] 在 Admin PC 浏览器中能打开同一个 SSO URL（应看到 sso 登录页）。

@@ -119,6 +119,7 @@ GHE.com 是 GitHub Enterprise Cloud with data residency：企业数据存放在�
 | `SP_ENTITY_ID` | `https://github.com/enterprises/<slug>` | `https://<subdomain>.ghe.com/enterprises/<slug>` |
 | `SP_ACS_URL` | `https://github.com/enterprises/<slug>/saml/consume` | `https://<subdomain>.ghe.com/enterprises/<slug>/saml/consume` |
 | `COPILOT_API_BASE_URL` | `https://api.githubcopilot.com` | `https://copilot-api.<subdomain>.ghe.com` |
+| 图片附件上传地址 | 自动推导为 `https://uploads.github.com/copilot/chat/attachments`，无需配置 | 自动推导为 `https://uploads.<subdomain>.ghe.com/copilot/chat/attachments`，无需配置（已实测） |
 | `GITHUB_OAUTH_CLIENT_ID` | OpenCode client id | 同左，不需要修改 |
 | shortcode | 创建 EMU 时自行填写，必须写入 `ENTERPRISE_SHORTCODE` | 由 GitHub 随机生成并隐藏；不需要配置，`ENTERPRISE_SHORTCODE` 即使填写也会被忽略 |
 | EMU 用户的 GH login | `<ssoUser>_<shortcode>`，最长 39 字符 | `<ssoUser>`，不带后缀，最长 30 字符 |
@@ -143,7 +144,7 @@ GHE.com 是 GitHub Enterprise Cloud with data residency：企业数据存放在�
 | 管理邮箱 | 用于接收初始超级管理员密码重置邮件，必须是真实可访问邮箱。 |
 | Copilot 开通 | Enterprise 需要能开通 GitHub Copilot；必要时可提交 GitHub Support 工单。 |
 | Billing | 可填写 GitHub Enterprise billing 信息，并可关联 Azure Subscription 或其他账单方式。 |
-| 网络 | 执行 SAML 登录的浏览器必须能访问 `sso`；可选择公网地址，或让服务器端 Login 浏览器通过 Docker 内网访问。服务器还需能访问 GitHub、SCIM 和 Copilot API。GHE.com 部署需能访问 `<subdomain>.ghe.com` 及其子域名（`api.`、`copilot-api.` 等）和 `auth.ghe.com`。 |
+| 网络 | 执行 SAML 登录的浏览器必须能访问 `sso`；可选择公网地址，或让服务器端 Login 浏览器通过 Docker 内网访问。服务器还需能访问 GitHub、SCIM 和 Copilot API（含图片上传地址 `uploads.github.com`）。GHE.com 部署需能访问 `<subdomain>.ghe.com` 及其子域名（`api.`、`copilot-api.`、`uploads.` 等）和 `auth.ghe.com`。 |
 | 证书 | 准备 SAML IdP 证书和私钥；开发验证可用 `scripts/gen-certs.sh` 生成。 |
 | 运行环境 | Docker / Docker Compose；本地开发还需要 Node.js 22 和 npm。 |
 
@@ -411,6 +412,8 @@ ports:
 | `COPILOT_API_BASE_URL` | `https://api.githubcopilot.com` | Proxy 直接访问 Copilot API 的 base URL；GHE.com 为 `https://copilot-api.<subdomain>.ghe.com`。 |
 | `OPENCODE_VERSION` | 根模板为 `1.18.4` | 生成 Proxy/Login 的 `User-Agent: opencode/<version>`；如显式注入 `OPENCODE_USER_AGENT`，后者优先。 |
 | `GITHUB_API_VERSION` | `2026-06-01` | Proxy 发给 Copilot API 的 `X-GitHub-Api-Version`。 |
+| `PROXY_IMAGE_UPLOAD_MODE` | `always` | Proxy 把内联 base64 图片上传为 Copilot 附件 URL 的策略：`always` 全部上传；`auto` 仅在上游 body 超过端点上限（chat 5 MiB，responses/messages 32 MiB）时上传；`off` 不上传。上传失败时自动回退为内联 base64，只写一行 WARN 日志，不生成错误诊断记录。上传地址由 `GITHUB_BASE_URL` 自动推导，无需配置。 |
+| `PROXY_MAX_REQUEST_BODY_MB` | `64` | Proxy 入站 JSON body 上限（MiB），必须为正整数；客户端仍以内联 base64 发图，该值决定单个请求能携带多少、多大的图片，仅用于保护 Proxy 内存。 |
 | `LOGIN_SSO_PROVIDER` | `custom` | 默认 SSO provider：`custom` 或 `azure`；任务参数可覆盖。 |
 | `AUTH_HEADLESS` | `true` | Playwright 是否无头运行。建议使用无头浏览器。 |
 
@@ -1048,9 +1051,9 @@ Error Diagnostics 页面用于排查 Copilot 上游错误。Proxy 在以下场�
 - Copilot 返回 HTTP 4xx/5xx；
 - fetch 连接、DNS、网络或 abort 失败；
 - JSON/SSE/其他响应流读取中断；
-- `/v1/messages/count_tokens` 上游返回 404/405/501，随后使用本地估算。
+- `/v1/messages/count_tokens` 上游返回 404/405/413/501，随后使用本地估算。
 
-页面顶部会显示 Collection enabled/disabled 和 Redacted/Unredacted 状态，先确认采集与脱敏配置是否符合预期。控制台常规日志只输出摘要和 `diagnosticId`。页面列表按最新优先显示时间、identity、route/model、失败类型、状态码，以及入站、实际上游请求和上游响应的 body 大小；打开 Details 可直接阅读逐行 headers、格式化 JSON/text body、可复制 curl、客户端原始请求、Claude Code 兼容处理后实际发送的请求，以及上游响应/异常。页面预览为避免浏览器卡顿会限制长度，**Download** 下载完整 `.log`。**Clear all** 会删除所有轮转文件且不可恢复。
+页面顶部会显示 Collection enabled/disabled 和 Redacted/Unredacted 状态，先确认采集与脱敏配置是否符合预期。控制台常规日志只输出摘要和 `diagnosticId`。页面列表按最新优先显示时间、identity、route/model、失败类型、状态码，以及入站、实际上游请求和上游响应的 body 大小；打开 Details 可直接阅读逐行 headers、格式化 JSON/text body、可复制 curl、客户端原始请求、Claude Code 兼容处理后实际发送的请求，以及上游响应/异常。请求 body 中的大段 base64 数据（如图片）会替换为摘要（媒体类型、字节数和 sha256 前缀），因此其中的 curl 无法重放原图。页面预览为避免浏览器卡顿会限制长度，**Download** 下载完整 `.log`。**Clear all** 会删除所有轮转文件且不可恢复。
 
 默认 `PROXY_ERROR_DIAGNOSTICS_REDACT=false`，因此详情和下载可能包含：
 
@@ -1134,7 +1137,7 @@ curl http://localhost:3000/v1/models \
 
 Compose 默认启用 `CLAUDE_CODE_OPTIMIZED=true`：`/v1/models` 只返回支持 `/v1/messages` 的模型，并使用 Claude Code 风格的分页字段。若请求头显式设置 `X-Claude-Code-Optimized: false`，则返回完整模型列表和 OpenAI 风格的 `object: "list"` 结构。请求头 `X-Cache: false` 可跳过当前 identity 的模型缓存。
 
-`POST /v1/messages/count_tokens` 只在 Claude Code optimized 模式下可用；关闭该模式后只支持 `/chat/completions`、`/responses`、`/v1/messages` 和 `/v1/models`。
+`POST /v1/messages/count_tokens` 只在 Claude Code optimized 模式下可用；关闭该模式后只支持 `/chat/completions`、`/responses`、`/v1/messages`、`/v1/models`，以及 `PROXY_IMAGE_UPLOAD_MODE` 不为 `off` 时的图片上传透传接口 `/copilot/chat/attachments`。
 
 ### 13.4 Anthropic Messages 示例
 

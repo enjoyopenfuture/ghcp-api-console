@@ -4,6 +4,7 @@ import {
   normalizeAnthropicModelId,
   type AnthropicModelProfile,
 } from './anthropicModelProfiles.js';
+import { containsImageContent } from './imageContent.js';
 import { AUTOMATIC_CONTINUE_PROMPT, resolveRequestIntent } from './requestIntent.js';
 
 export interface ClaudeCodeForwardOptions {
@@ -39,6 +40,8 @@ const TOKEN_COUNTING_BETA = 'token-counting-2024-11-01';
 const CONTEXT_1M_BETA = 'context-1m-2025-08-07';
 const INJECTED_SYSTEM_MARKER = '[Claude Code injected]\n';
 const TOOL_LOADED_MARKER = 'Tool loaded.';
+// Anthropic bills roughly (width * height) / 750 tokens per image; 1600 is the cap for images it does not downscale.
+const ESTIMATED_IMAGE_TOKENS = 1600;
 
 const ALLOWED_ANTHROPIC_BETAS = new Set([
   INTERLEAVED_THINKING_BETA,
@@ -66,7 +69,7 @@ export function prepareClaudeCodeMessagesRequest(
       claudeCodeOptimized: true,
       anthropicVersion: headerValue(req, 'anthropic-version') ?? DEFAULT_ANTHROPIC_VERSION,
       anthropicBeta: anthropicBetaHeader(req, prepared, profile, options),
-      visionRequest: containsContentBlockType(prepared, 'image'),
+      visionRequest: containsImageContent('/v1/messages', prepared),
       initiator: intent.initiator,
       interactionType: intent.interactionType,
     },
@@ -94,11 +97,17 @@ export function preprocessClaudeCodeMessagesBody(body: Record<string, unknown>):
 }
 
 export function estimateInputTokens(body: Record<string, unknown>): number {
-  return Math.max(1, Math.ceil(JSON.stringify(body).length / 4));
+  let imageCount = 0;
+  const text = JSON.stringify(body, (_key, value: unknown) => {
+    if (!isImageContentBlock(value)) return value;
+    imageCount++;
+    return undefined;
+  });
+  return Math.max(1, Math.ceil(text.length / 4) + imageCount * ESTIMATED_IMAGE_TOKENS);
 }
 
 export function isTokenCountFallbackStatus(status: number): boolean {
-  return status === 404 || status === 405 || status === 501;
+  return status === 404 || status === 405 || status === 413 || status === 501;
 }
 
 export function shouldTranslateWebSearchError(status: number, bodyText: string, requestBody: Record<string, unknown> | undefined): boolean {
@@ -483,12 +492,9 @@ function webSearchUnsupportedMessageForTool(toolType: string): string {
   );
 }
 
-function containsContentBlockType(value: unknown, blockType: string): boolean {
-  if (Array.isArray(value)) return value.some((item) => containsContentBlockType(item, blockType));
+function isImageContentBlock(value: unknown): boolean {
   const object = recordField(value);
-  if (!object) return false;
-  if (object.type === blockType) return true;
-  return Object.values(object).some((child) => containsContentBlockType(child, blockType));
+  return object?.type === 'image' && recordField(object.source) !== undefined;
 }
 
 function cloneJson(value: unknown): unknown {
